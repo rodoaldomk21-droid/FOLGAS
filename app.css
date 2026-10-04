@@ -83,3 +83,10 @@ input:focus, select:focus { outline: 2px solid var(--destaque); outline-offset: 
 /* Etapa 4 */
 .contexto.alerta { color: var(--queda); font-weight: 600; }
 .curva .rotulo { fill: var(--suave); font-size: 10px; }
+/* Etapa 5 */
+:root { --ambar: #B45309; }
+@media (prefers-color-scheme: dark) { :root { --ambar: #FBBF24; } }
+.veredito { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin: 22px 0 6px; }
+.v-ok { color: var(--subida); } .v-medio { color: var(--ambar); } .v-ruim { color: var(--queda); }
+.curva .base { fill: none; stroke: var(--suave); stroke-width: 2; stroke-dasharray: 3 4; }
+.pequeno { font-size: 14px; color: var(--suave); margin-top: 8px; }

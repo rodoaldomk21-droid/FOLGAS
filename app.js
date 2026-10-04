@@ -109,6 +109,42 @@ function curvaSVG(curva, margem) {
     <text class="eixo" x="${X0}" y="128">hoje</text><text class="eixo" x="${X0 + XW}" y="128" text-anchor="end">recebimento</text></svg>`;
 }
 
+/* ---------- Simulação de compra ---------- */
+const isoDe = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const diasAte = d => { const h = new Date(); return Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(h.getFullYear(), h.getMonth(), h.getDate())) / 864e5); };
+const diaDoIndice = i => { const h = new Date(); return dataCurta(isoDe(new Date(h.getFullYear(), h.getMonth(), h.getDate() + i))); };
+// Soma meses mantendo o dia (31 em mês curto vira o último dia)
+function somaMes(d, k) { const ult = new Date(d.getFullYear(), d.getMonth() + k + 1, 0).getDate(); return new Date(d.getFullYear(), d.getMonth() + k, Math.min(d.getDate(), ult)); }
+
+// Projeção longa (90 dias): recebimentos fixos (valor mínimo) + despesas pendentes já lançadas + extras.
+function projetarLongo(cfg, lancs, extras = [], horizonte = 90) {
+  const saldoAtual = saldoDe(cfg, lancs), h = new Date();
+  const delta = new Array(horizonte + 1).fill(0);
+  cfg.recebimentos.forEach(r => {
+    for (let m = 0; m < 5; m++) {
+      const ult = new Date(h.getFullYear(), h.getMonth() + m + 1, 0).getDate();
+      const i = diasAte(new Date(h.getFullYear(), h.getMonth() + m, Math.min(r.dia, ult)));
+      if (i >= 1 && i <= horizonte) delta[i] += r.minimo;
+    }
+  });
+  lancs.filter(l => l.tipo === 'despesa' && !l.pago).forEach(l => { const i = Math.max(0, diasAte(new Date(l.data + 'T00:00:00'))); if (i <= horizonte) delta[i] -= l.valor; });
+  extras.forEach(x => { if (x.i <= horizonte) delta[x.i] -= x.valor; });
+  let s = saldoAtual; const curva = delta.map(d => (s += d));
+  let iMin = 0; curva.forEach((v, i) => { if (v < curva[iMin]) iMin = i; });
+  return { curva, iMin, min: curva[iMin] };
+}
+
+function curvaDupla(a, b, margem) {
+  const n = a.length - 1, X0 = 20, XW = 320, Y0 = 14, YH = 92;
+  const todos = [...a, ...b, margem], lo = Math.min(...todos), r = (Math.max(...todos) - lo) || 1;
+  const x = i => X0 + (i * XW) / n, y = v => Y0 + (1 - (v - lo) / r) * YH;
+  const cam = c => { let d = `M${x(0)} ${y(c[0])}`; for (let i = 1; i <= n; i++) d += ` L${x(i)} ${y(c[i - 1])} L${x(i)} ${y(c[i])}`; return d; };
+  return `<svg class="curva" viewBox="0 0 360 140" role="img" aria-label="Saldo projetado com e sem a compra">
+    <line class="margem" x1="${X0}" x2="${X0 + XW}" y1="${y(margem)}" y2="${y(margem)}"/><text class="rotulo" x="${X0}" y="${y(margem) - 4}">margem</text>
+    <path class="base" d="${cam(a)}"/><path class="linha" d="${cam(b)}"/>
+    <text class="eixo" x="${X0}" y="128">hoje</text><text class="eixo" x="${X0 + XW}" y="128" text-anchor="end">${n} dias</text></svg>`;
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -210,7 +246,60 @@ const telas = {
       <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>`;
     document.getElementById('editar').onclick = () => formConfig(cfg, p.saldoAtual);
   },
-  async comprar() { area.innerHTML = `<div class="vazio"><h1>Posso comprar?</h1><div class="gigante" style="font-size:40px">Em breve</div><p>Aqui você vai digitar um valor, à vista ou parcelado, e ver se cabe antes de comprar.</p></div>`; },
+  async comprar() {
+    const cfg = await DB.ler('config');
+    if (!cfg || cfg.saldo === undefined) { area.innerHTML = '<div class="vazio"><h1>Posso comprar?</h1><p>Termine a configuração na aba Hoje primeiro.</p></div>'; return; }
+    const lancs = await LANC.todos();
+    const opcoes = Array.from({ length: 12 }, (_, k) => `<option value="${k + 1}">${k ? (k + 1) + 'x' : 'À vista (sai hoje)'}</option>`).join('');
+    area.innerHTML = `<div class="form"><h1>Posso comprar?</h1>
+      <label>Valor total</label><input id="cv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00">
+      <label>Em quantas vezes</label><select id="cn">${opcoes}</select>
+      <div id="cdata" style="display:none"><label>Vencimento da 1ª parcela</label><input id="cd" type="date" value="${isoDe(somaMes(new Date(), 1))}"></div>
+      <label>O que é? (para registrar)</label><input id="cdesc" autocomplete="off" placeholder="Ex.: Celular">
+      <div id="res"></div></div>`;
+    const $ = id => area.querySelector('#' + id);
+    ligarDinheiro($('cv'));
+    let atual = null;
+    const atualizar = () => {
+      const total = +($('cv').dataset.c || 0), n = +$('cn').value;
+      $('cdata').style.display = n > 1 ? '' : 'none';
+      atual = null;
+      if (total <= 0) { $('res').innerHTML = '<p class="pequeno" style="margin-top:20px">Digite o valor para ver o impacto nos próximos 90 dias.</p>'; return; }
+      let extras, base = null;
+      if (n === 1) extras = [{ i: 0, valor: total }];
+      else {
+        base = new Date($('cd').value + 'T00:00:00');
+        if (isNaN(base)) { $('res').innerHTML = '<p class="erro">Escolha uma data válida para a 1ª parcela.</p>'; return; }
+        const p0 = Math.floor(total / n);
+        extras = Array.from({ length: n }, (_, k) => ({ i: Math.max(0, diasAte(somaMes(base, k))), valor: p0 + (k === 0 ? total - p0 * n : 0) }));
+      }
+      atual = { total, n, extras, base };
+      const sem = projetarLongo(cfg, lancs), com = projetarLongo(cfg, lancs, extras);
+      const l0 = projetar(cfg, lancs).livre, l1 = projetar(cfg, lancs, extras).livre;
+      let cls, titulo, motivo;
+      if (com.min < 0) { cls = 'v-ruim'; titulo = 'Não cabe'; motivo = `No dia ${diaDoIndice(com.iMin)} o saldo fica negativo (${brl(com.min)}).`; }
+      else if (com.min < cfg.margem) { cls = 'v-medio'; titulo = 'Cabe, mas aperta'; motivo = `No dia ${diaDoIndice(com.iMin)} o saldo cai para ${brl(com.min)}, abaixo da sua margem de ${brl(cfg.margem)}.${sem.min < cfg.margem ? ' Esse período já estava apertado antes da compra.' : ''}`; }
+      else { cls = 'v-ok'; titulo = 'Cabe'; motivo = `O saldo não passa da sua margem nos próximos 90 dias. O ponto mais baixo é ${brl(com.min)}, no dia ${diaDoIndice(com.iMin)}.`; }
+      $('res').innerHTML = `<div class="veredito ${cls}">${titulo}</div><p class="contexto" style="margin-bottom:12px">${motivo}</p>
+        ${curvaDupla(sem.curva, com.curva, cfg.margem)}
+        <p class="pequeno">Tracejado: sem a compra · Linha cheia: com a compra.</p>
+        <p class="contexto" style="margin-top:14px">Livre por dia até o próximo recebimento: <b>${brl(Math.max(l0, 0))}</b> → <b>${brl(Math.max(l1, 0))}</b></p>
+        <p class="pequeno">Considera só as contas que você já lançou e os recebimentos pelo valor mínimo. Contas fixas futuras ainda não lançadas não entram.</p>
+        <p class="erro" id="cerr" role="alert"></p>
+        <button class="botao" id="creg">Registrar compra</button><button class="botao sec" id="cdes">Desistir</button>`;
+      $('cdes').onclick = () => mostrar('comprar');
+      $('creg').onclick = async () => {
+        const desc = $('cdesc').value.trim();
+        if (!desc) return $('cerr').textContent = 'Informe o que é a compra, no campo acima, para registrar.';
+        if (n === 1) await LANC.salvar({ tipo: 'despesa', desc, valor: total, data: hojeISO(), pago: true, pagoEm: Date.now() });
+        else { const grupo = Date.now(); for (let k = 0; k < n; k++) await LANC.salvar({ tipo: 'despesa', desc: `${desc} (${k + 1}/${n})`, valor: extras[k].valor, data: isoDe(somaMes(base, k)), pago: false, pagoEm: null, grupo, parcela: k + 1, total: n }); }
+        if (n > 1) filtro = 'pendentes';
+        mostrar(n === 1 ? 'hoje' : 'contas');
+      };
+    };
+    ['input', 'change'].forEach(ev => area.querySelector('.form').addEventListener(ev, e => { if (e.target.id !== 'cdesc') atualizar(); }));
+    atualizar();
+  },
   async contas() {
     const todos = (await LANC.todos()).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
     const vis = filtro === 'pendentes' ? todos.filter(l => !l.pago) : todos;
