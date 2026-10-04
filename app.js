@@ -24,7 +24,20 @@ const DB = {
   }
 };
 
+const LANC = {
+  async op(modo, fn) {
+    const d = await DB.abrir();
+    return new Promise((ok, falha) => { const st = d.transaction('lancamentos', modo).objectStore('lancamentos'); fn(st, ok, falha); });
+  },
+  todos() { return this.op('readonly', (st, ok) => { const q = st.getAll(); q.onsuccess = () => ok(q.result); }); },
+  salvar(l) { return this.op('readwrite', (st, ok, f) => { const q = st.put(l); q.onsuccess = () => ok(q.result); q.onerror = () => f(q.error); }); },
+  apagar(id) { return this.op('readwrite', (st, ok) => { const q = st.delete(id); q.onsuccess = () => ok(); }); }
+};
+
 /* ---------- Utilidades ---------- */
+const hojeISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const dataCurta = iso => new Date(iso + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '');
+
 const brl = c => (c / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const esc = s => String(s).replace(/[&<>"]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]));
 
@@ -110,10 +123,13 @@ async function salvarConfig() {
   mostrar('hoje');
 }
 
+let filtro = 'pendentes';
 const telas = {
   async hoje() {
     const cfg = await DB.ler('config');
     if (!cfg) return formConfig(null);
+    const pend = (await LANC.todos()).filter(l => l.tipo === 'despesa' && !l.pago);
+    const totalPend = pend.reduce((t, l) => t + l.valor, 0);
     const hoje = new Date();
     const lista = cfg.recebimentos
       .map(r => ({ ...r, data: proximaData(r.dia, hoje) }))
@@ -132,13 +148,69 @@ const telas = {
         <path class="linha" d="M20 90 L60 82 L100 68 L140 72 L180 50 L220 56 L260 78 L300 64 L340 60"/>
         <circle class="aperto" cx="180" cy="70" r="5"/>
       </svg>
+      <p class="aviso">Contas pendentes: <b>${pend.length}</b> · ${brl(totalPend)}</p>
       <div class="lista"><h1>Próximos recebimentos (valor mínimo)</h1>${lista}</div>
       <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos</button>`;
     document.getElementById('editar').onclick = () => formConfig(cfg);
   },
   async comprar() { area.innerHTML = `<div class="vazio"><h1>Posso comprar?</h1><div class="gigante" style="font-size:40px">Em breve</div><p>Aqui você vai digitar um valor, à vista ou parcelado, e ver se cabe antes de comprar.</p></div>`; },
-  async contas() { area.innerHTML = `<div class="vazio"><h1>Contas</h1><div class="gigante" style="font-size:40px">Em breve</div><p>Aqui ficará a agenda do que entra e sai, em ordem de data.</p></div>`; }
+  async contas() {
+    const todos = (await LANC.todos()).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
+    const vis = filtro === 'pendentes' ? todos.filter(l => !l.pago) : todos;
+    const itens = vis.map(l => `
+      <div class="item ${l.pago ? 'paga' : ''}" data-id="${l.id}">
+        <div><div class="data">${dataCurta(l.data)}${l.pago ? '' : ' · pendente'}</div><div class="desc">${esc(l.desc)}</div></div>
+        <div><div class="val ${l.tipo === 'receita' ? 'rec' : 'desp'}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</div>
+          <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="del">Excluir</button></div></div>
+      </div>`).join('');
+    area.innerHTML = `<h1>Contas</h1>
+      <div class="filtros"><button data-f="pendentes" class="${filtro === 'pendentes' ? 'on' : ''}">Pendentes</button><button data-f="todos" class="${filtro === 'todos' ? 'on' : ''}">Todas</button></div>
+      ${itens || '<p class="contexto" style="margin-top:24px">Nada por aqui. Toque no + para lançar.</p>'}`;
+    area.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; mostrar('contas'); });
+    area.querySelectorAll('.item').forEach(el => {
+      const l = todos.find(x => x.id === +el.dataset.id);
+      el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; await LANC.salvar(l); mostrar('contas'); };
+      el.querySelector('[data-a=del]').onclick = async () => { if (confirm('Excluir "' + l.desc + '"?')) { await LANC.apagar(l.id); mostrar('contas'); } };
+    });
+  }
 };
+
+async function abrirLancamento() {
+  const sug = [...new Set((await LANC.todos()).map(l => l.desc))];
+  let tipo = 'despesa', pago = true;
+  const f = document.createElement('div'); f.className = 'folha';
+  f.innerHTML = `<div class="painel form">
+    <div class="seg" id="sTipo"><button data-v="despesa">Despesa</button><button data-v="receita">Receita</button></div>
+    <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00">
+    <label>Descrição</label><input id="ld" list="sug" autocomplete="off" placeholder="Ex.: Mercado"><datalist id="sug">${sug.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+    <label>Data</label><input id="ldt" type="date" value="${hojeISO()}">
+    <label>Situação</label><div class="seg" id="sPago"><button data-v="1"></button><button data-v="0">Pendente</button></div>
+    <p class="erro" id="le" role="alert"></p>
+    <button class="botao" id="ls">Salvar</button><button class="botao sec" id="lc">Cancelar</button></div>`;
+  document.body.appendChild(f);
+  const $ = id => f.querySelector('#' + id);
+  const pintar = () => {
+    f.querySelectorAll('#sTipo button').forEach(b => b.classList.toggle('on', b.dataset.v === tipo));
+    f.querySelector('#sPago button[data-v="1"]').textContent = tipo === 'receita' ? 'Recebido' : 'Pago';
+    f.querySelectorAll('#sPago button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === pago));
+  };
+  f.querySelectorAll('#sTipo button').forEach(b => b.onclick = () => { tipo = b.dataset.v; pintar(); });
+  f.querySelectorAll('#sPago button').forEach(b => b.onclick = () => { pago = b.dataset.v === '1'; pintar(); });
+  pintar(); ligarDinheiro($('lv')); $('lv').focus();
+  const fechar = () => f.remove();
+  $('lc').onclick = fechar;
+  f.addEventListener('click', e => { if (e.target === f) fechar(); });
+  $('ls').onclick = async () => {
+    const valor = +($('lv').dataset.c || 0), desc = $('ld').value.trim(), data = $('ldt').value;
+    if (valor <= 0) return $('le').textContent = 'Informe um valor maior que zero.';
+    if (!desc) return $('le').textContent = 'Informe uma descrição.';
+    if (!data || isNaN(new Date(data + 'T00:00:00'))) return $('le').textContent = 'Escolha uma data válida.';
+    await LANC.salvar({ tipo, desc, valor, data, pago });
+    fechar(); mostrar(document.querySelector('nav .ativa').dataset.tela);
+  };
+}
+const fab = document.createElement('button'); fab.className = 'fab'; fab.textContent = '+'; fab.setAttribute('aria-label', 'Novo lançamento');
+fab.onclick = abrirLancamento; document.body.appendChild(fab);
 
 async function mostrar(nome) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === nome));
