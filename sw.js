@@ -1,6 +1,6 @@
 // Guarda os arquivos no iPhone para o app abrir sem internet.
 // Ao alterar qualquer arquivo, mude o número da versão abaixo.
-const VERSAO = 'folga-v2';
+const VERSAO = 'folga-v3';
 const ARQUIVOS = ['./', 'index.html', 'manifest.json', 'app.css', 'app.js', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

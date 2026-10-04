@@ -40,3 +40,22 @@ nav button {
 }
 nav button.ativa { color: var(--destaque); box-shadow: inset 0 3px 0 var(--destaque); }
 @media (prefers-reduced-motion: no-preference) { nav button { transition: color .15s; } }
+/* Etapa 2: formulário */
+.form h2 { font-size: 28px; letter-spacing: -0.02em; margin-bottom: 6px; }
+.form .intro { color: var(--suave); margin-bottom: 24px; }
+label { display: block; font-size: 14px; color: var(--suave); margin: 14px 0 6px; }
+input, select {
+  width: 100%; font: 600 18px/1.2 inherit; font-family: inherit; color: var(--tinta);
+  background: var(--papel); border: 1px solid var(--linha); border-radius: 10px; padding: 13px 14px;
+  font-variant-numeric: tabular-nums;
+}
+input:focus, select:focus { outline: 2px solid var(--destaque); outline-offset: 1px; }
+.bloco { background: var(--papel); border-left: 3px solid var(--destaque); border-radius: 0 12px 12px 0; padding: 4px 16px 16px; margin-top: 16px; }
+.bloco h3 { font-size: 16px; margin-top: 14px; }
+.duas { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.erro { color: var(--queda); margin-top: 16px; min-height: 1.4em; font-weight: 600; }
+.botao { width: 100%; margin-top: 12px; border: 0; border-radius: 12px; background: var(--destaque); color: var(--fundo); font: 700 18px/1 inherit; font-family: inherit; padding: 17px; }
+.botao.sec { background: none; color: var(--destaque); border: 1px solid var(--linha); font-weight: 600; }
+.lista { margin-top: 28px; }
+.lista div { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--linha); }
+.lista span:last-child { color: var(--suave); text-align: right; }
