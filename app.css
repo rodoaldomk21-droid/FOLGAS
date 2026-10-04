@@ -90,3 +90,7 @@ input:focus, select:focus { outline: 2px solid var(--destaque); outline-offset: 
 .v-ok { color: var(--subida); } .v-medio { color: var(--ambar); } .v-ruim { color: var(--queda); }
 .curva .base { fill: none; stroke: var(--suave); stroke-width: 2; stroke-dasharray: 3 4; }
 .pequeno { font-size: 14px; color: var(--suave); margin-top: 8px; }
+/* Etapa 7 */
+input[type=file] { display: none; }
+label.botao { display: block; text-align: center; cursor: pointer; margin: 12px 0 0; color: var(--destaque); background: none; border: 1px solid var(--linha); font-weight: 600; }
+.ok { color: var(--subida); font-weight: 600; margin-top: 16px; min-height: 1.4em; }

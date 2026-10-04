@@ -208,6 +208,52 @@ function formRec(r) {
   };
 }
 
+/* ---------- Backup ---------- */
+function validarBackup(b) {
+  const int = v => Number.isInteger(v), dataOk = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isNaN(new Date(v + 'T00:00:00'));
+  if (!b || b.app !== 'folga' || b.versao !== 1) return 'Este arquivo não é um backup do Folga.';
+  const c = b.config;
+  if (!c || !c.nomes || typeof c.nomes.eu !== 'string' || typeof c.nomes.esposa !== 'string' || !int(c.margem) || c.margem < 0 || !int(c.saldo) || typeof c.saldoEm !== 'number' || !Array.isArray(c.recebimentos) || !c.recebimentos.length) return 'A configuração do backup está incompleta.';
+  if (!c.recebimentos.every(r => ['eu', 'esposa'].includes(r.quem) && int(r.dia) && r.dia >= 1 && r.dia <= 31 && int(r.minimo) && r.minimo > 0 && int(r.medio) && r.medio > 0)) return 'Os recebimentos do backup são inválidos.';
+  if (!Array.isArray(b.lancamentos) || !b.lancamentos.every(l => ['despesa', 'receita'].includes(l.tipo) && typeof l.desc === 'string' && int(l.valor) && l.valor > 0 && dataOk(l.data) && typeof l.pago === 'boolean')) return 'Há lançamentos inválidos no backup.';
+  if (!Array.isArray(b.recorrentes) || !b.recorrentes.every(r => int(r.id) && typeof r.desc === 'string' && int(r.valor) && r.valor > 0 && FREQ[r.freq] && dataOk(r.inicio) && Array.isArray(r.gerados))) return 'Há contas recorrentes inválidas no backup.';
+  return null;
+}
+
+async function exportarBackup(msg) {
+  const cfg = await DB.ler('config');
+  if (!cfg || cfg.saldo === undefined) return msg('Termine a configuração na aba Hoje antes de fazer backup.', true);
+  const dados = { app: 'folga', versao: 1, exportadoEm: new Date().toISOString(), config: cfg, recorrentes: (await DB.ler('recorrentes')) || [], lancamentos: await LANC.todos() };
+  const nome = `folga-backup-${hojeISO()}.json`;
+  const arquivo = new File([JSON.stringify(dados, null, 1)], nome, { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [arquivo] })) await navigator.share({ files: [arquivo], title: 'Backup Folga' });
+    else { const url = URL.createObjectURL(arquivo), a = document.createElement('a'); a.href = url; a.download = nome; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000); }
+  } catch (e) { return msg(e.name === 'AbortError' ? 'Backup cancelado.' : 'Não foi possível exportar. Tente de novo.', true); }
+  await DB.gravar('ultimoBackup', Date.now());
+  msg(`Backup gerado com ${dados.lancamentos.length} lançamentos. Guarde o arquivo em Arquivos ou iCloud.`);
+}
+
+async function restaurarBackup(arquivo, msg) {
+  let b;
+  try { b = JSON.parse(await arquivo.text()); } catch { return msg('Não consegui ler o arquivo. Ele precisa ser um backup .json do Folga.', true); }
+  const erro = validarBackup(b);
+  if (erro) return msg(erro + ' Nada foi alterado.', true);
+  if (!confirm(`Restaurar vai SUBSTITUIR todos os dados atuais por este backup (${b.lancamentos.length} lançamentos, feito em ${new Date(b.exportadoEm).toLocaleDateString('pt-BR')}). Continuar?`)) return msg('Restauração cancelada. Nada foi alterado.');
+  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'grupo', 'parcela', 'total'];
+  const limpos = b.lancamentos.map(l => Object.fromEntries(campos.filter(k => l[k] !== undefined).map(k => [k, l[k]])));
+  const d = await DB.abrir();
+  try {
+    await new Promise((ok, falha) => { // tudo ou nada: se algo falhar, os dados atuais ficam intactos
+      const t = d.transaction(['config', 'lancamentos'], 'readwrite'), c = t.objectStore('config'), l = t.objectStore('lancamentos');
+      l.clear(); c.put(b.config, 'config'); c.put(b.recorrentes, 'recorrentes'); limpos.forEach(x => l.put(x));
+      t.oncomplete = ok; t.onerror = t.onabort = () => falha(t.error);
+    });
+  } catch { return msg('Falha ao restaurar. Seus dados atuais foram mantidos.', true); }
+  await gerarRecorrentes();
+  mostrar('hoje');
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -280,6 +326,8 @@ const telas = {
     if (cfg.saldo === undefined) return formConfig(cfg, null);
     const lancs = await LANC.todos();
     const p = projetar(cfg, lancs);
+    const ub = await DB.ler('ultimoBackup');
+    const velho = !ub || Date.now() - ub > 30 * 864e5;
     const pend = lancs.filter(l => l.tipo === 'despesa' && !l.pago);
     const totalPend = pend.reduce((t, l) => t + l.valor, 0);
     const hoje = new Date();
@@ -306,7 +354,10 @@ const telas = {
       <p class="contexto">${apertoTxt}</p>
       <p class="aviso">Contas pendentes: <b>${pend.length}</b> · ${brl(totalPend)}. O cálculo usa o valor mínimo dos recebimentos.</p>
       <div class="lista"><h1>Próximos recebimentos (valor mínimo)</h1>${lista}</div>
-      <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>`;
+      ${velho ? `<p class="aviso" style="margin-top:20px">${ub ? 'Seu último backup tem mais de 30 dias.' : 'Você ainda não fez backup.'} Faça um para não perder seus dados.</p>` : ''}
+      <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>
+      <button class="botao sec" id="bkp">Backup e restauração</button>`;
+    document.getElementById('bkp').onclick = () => mostrar('backup');
     document.getElementById('editar').onclick = () => formConfig(cfg, p.saldoAtual);
   },
   async recorrentes() {
@@ -330,6 +381,20 @@ const telas = {
         mostrar('recorrentes');
       };
     });
+  },
+  async backup() {
+    const ub = await DB.ler('ultimoBackup');
+    area.innerHTML = `<div class="form"><h2>Backup</h2>
+      <p class="intro">Seus dados ficam só neste iPhone. Se o app for removido ou os dados do Safari forem apagados, eles se perdem. O backup é um arquivo que você guarda no app Arquivos ou no iCloud.</p>
+      <p class="pequeno">${ub ? 'Último backup: ' + new Date(ub).toLocaleDateString('pt-BR') : 'Você ainda não fez nenhum backup.'}</p>
+      <button class="botao" id="exp" style="margin-top:16px">Exportar backup</button>
+      <label class="botao" for="arq">Restaurar de um arquivo</label><input type="file" id="arq" accept=".json,application/json">
+      <p id="msg" role="status"></p>
+      <button class="botao sec" id="voltar" style="margin-top:24px">Voltar</button></div>`;
+    const msg = (t, erro) => { const m = area.querySelector('#msg'); m.className = erro ? 'erro' : 'ok'; m.textContent = t; };
+    area.querySelector('#exp').onclick = () => exportarBackup(msg);
+    area.querySelector('#arq').onchange = e => { if (e.target.files[0]) restaurarBackup(e.target.files[0], msg); e.target.value = ''; };
+    area.querySelector('#voltar').onclick = () => mostrar('hoje');
   },
   async comprar() {
     const cfg = await DB.ler('config');
@@ -446,7 +511,7 @@ const fab = document.createElement('button'); fab.className = 'fab'; fab.textCon
 fab.onclick = abrirLancamento; document.body.appendChild(fab);
 
 async function mostrar(nome) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : nome)));
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : nome === 'backup' ? 'hoje' : nome)));
   await telas[nome]();
   window.scrollTo(0, 0);
 }
