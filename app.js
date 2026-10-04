@@ -147,6 +147,8 @@ function curvaDupla(a, b, margem) {
 
 /* ---------- Contas recorrentes ---------- */
 // Cada recorrente guarda: desc, valor, freq (mensal/semanal/anual), inicio (um vencimento) e 'gerados' (datas já criadas).
+const CATEGORIAS = ['Alimentação', 'Casa', 'Transporte', 'Saúde', 'Educação', 'Lazer', 'Compras', 'Contas', 'Dívidas', 'Outros'];
+const opcoesCat = sel => CATEGORIAS.map(c => `<option ${c === sel ? 'selected' : ''}>${c}</option>`).join('');
 const FREQ = { mensal: 'Todo mês', semanal: 'Toda semana', anual: 'Todo ano' };
 function ocorrencia(r, k) {
   const ini = new Date(r.inicio + 'T00:00:00');
@@ -164,7 +166,7 @@ async function gerarRecorrentes() {
       if (i > 120) break;
       const iso = isoDe(d);
       if (i < 0 || r.gerados.includes(iso)) continue;
-      await LANC.salvar({ tipo: 'despesa', desc: r.desc, valor: r.valor, data: iso, pago: false, pagoEm: null, recorrenteId: r.id });
+      await LANC.salvar({ tipo: 'despesa', desc: r.desc, valor: r.valor, data: iso, pago: false, pagoEm: null, recorrenteId: r.id, categoria: r.categoria || 'Contas' });
       r.gerados.push(iso); mudou = true;
     }
   }
@@ -185,6 +187,7 @@ function formRec(r) {
     <p class="intro">Ela cria sozinha os próximos lançamentos (até 4 meses à frente). Para contas de valor variável, use o valor médio.</p>
     <label>Descrição</label><input id="rd" value="${esc(c.desc)}" placeholder="Ex.: Aluguel" autocomplete="off">
     <label>Valor</label><input id="rv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" data-c="${c.valor || ''}">
+    <label>Categoria</label><select id="rcat">${opcoesCat(c.categoria || 'Contas')}</select>
     <label>Repete</label><select id="rf">${Object.entries(FREQ).map(([k, v]) => `<option value="${k}" ${c.freq === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
     <label>Próximo vencimento</label><input id="ri" type="date" value="${c.inicio}">
     <p class="erro" id="re" role="alert"></p>
@@ -193,15 +196,15 @@ function formRec(r) {
   ligarDinheiro($('rv'));
   $('rc').onclick = () => mostrar('recorrentes');
   $('rs').onclick = async () => {
-    const desc = $('rd').value.trim(), valor = +($('rv').dataset.c || 0), freq = $('rf').value, inicio = $('ri').value;
+    const desc = $('rd').value.trim(), valor = +($('rv').dataset.c || 0), freq = $('rf').value, inicio = $('ri').value, categoria = $('rcat').value;
     const erro = m => { $('re').textContent = m; };
     if (!desc) return erro('Informe a descrição.');
     if (valor <= 0) return erro('Informe um valor maior que zero.');
     if (!inicio || isNaN(new Date(inicio + 'T00:00:00'))) return erro('Escolha uma data válida.');
     if (inicio < hojeISO()) return erro('O vencimento não pode estar no passado.');
     const lista = (await DB.ler('recorrentes')) || [];
-    if (r) { const x = lista.find(y => y.id === r.id); x.gerados = await limparFuturos(x); Object.assign(x, { desc, valor, freq, inicio }); }
-    else lista.push({ id: Date.now(), desc, valor, freq, inicio, gerados: [] });
+    if (r) { const x = lista.find(y => y.id === r.id); x.gerados = await limparFuturos(x); Object.assign(x, { desc, valor, freq, inicio, categoria }); }
+    else lista.push({ id: Date.now(), desc, valor, freq, inicio, categoria, gerados: [] });
     await DB.gravar('recorrentes', lista);
     await gerarRecorrentes();
     mostrar('recorrentes');
@@ -240,7 +243,7 @@ async function restaurarBackup(arquivo, msg) {
   const erro = validarBackup(b);
   if (erro) return msg(erro + ' Nada foi alterado.', true);
   if (!confirm(`Restaurar vai SUBSTITUIR todos os dados atuais por este backup (${b.lancamentos.length} lançamentos, feito em ${new Date(b.exportadoEm).toLocaleDateString('pt-BR')}). Continuar?`)) return msg('Restauração cancelada. Nada foi alterado.');
-  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'grupo', 'parcela', 'total'];
+  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'categoria', 'grupo', 'parcela', 'total'];
   const limpos = b.lancamentos.map(l => Object.fromEntries(campos.filter(k => l[k] !== undefined).map(k => [k, l[k]])));
   const d = await DB.abrir();
   try {
@@ -252,6 +255,21 @@ async function restaurarBackup(arquivo, msg) {
   } catch { return msg('Falha ao restaurar. Seus dados atuais foram mantidos.', true); }
   await gerarRecorrentes();
   mostrar('hoje');
+}
+
+/* ---------- Fechamento do mês ---------- */
+const ymDe = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+// Receitas = salários fixos pelo valor MÉDIO (ainda não há confirmação do valor real) + receitas lançadas e recebidas.
+function resumoMes(cfg, lancs, ym) {
+  const ini = new Date(cfg.saldoEm), iniYM = ymDe(ini);
+  const doMes = lancs.filter(l => l.data.startsWith(ym));
+  const fixos = cfg.recebimentos.filter(r => ym > iniYM || (ym === iniYM && r.dia >= ini.getDate())).reduce((t, r) => t + r.medio, 0);
+  const soma = a => a.reduce((t, l) => t + l.valor, 0);
+  const rec = soma(doMes.filter(l => l.tipo === 'receita' && l.pago));
+  const desp = doMes.filter(l => l.tipo === 'despesa'), pagas = desp.filter(l => l.pago), pend = desp.filter(l => !l.pago);
+  const porCat = {}; desp.forEach(l => { const c = l.categoria || 'Sem categoria'; porCat[c] = (porCat[c] || 0) + l.valor; });
+  return { temDados: doMes.length > 0, fixos, rec, pagas: soma(pagas), nPagas: pagas.length, pend: soma(pend), nPend: pend.length,
+           saldo: ym < iniYM ? -soma(pagas) + rec : fixos + rec - soma(pagas), cats: Object.entries(porCat).sort((a, b) => b[1] - a[1]) };
 }
 
 /* ---------- Telas ---------- */
@@ -318,7 +336,7 @@ async function salvarConfig() {
   mostrar('hoje');
 }
 
-let filtro = 'pendentes';
+let filtro = 'pendentes', mesFech = null;
 const telas = {
   async hoje() {
     const cfg = await DB.ler('config');
@@ -356,7 +374,9 @@ const telas = {
       <div class="lista"><h1>Próximos recebimentos (valor mínimo)</h1>${lista}</div>
       ${velho ? `<p class="aviso" style="margin-top:20px">${ub ? 'Seu último backup tem mais de 30 dias.' : 'Você ainda não fez backup.'} Faça um para não perder seus dados.</p>` : ''}
       <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>
+      <button class="botao sec" id="fech">Fechamento do mês</button>
       <button class="botao sec" id="bkp">Backup e restauração</button>`;
+    document.getElementById('fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
     document.getElementById('bkp').onclick = () => mostrar('backup');
     document.getElementById('editar').onclick = () => formConfig(cfg, p.saldoAtual);
   },
@@ -395,6 +415,36 @@ const telas = {
     area.querySelector('#exp').onclick = () => exportarBackup(msg);
     area.querySelector('#arq').onchange = e => { if (e.target.files[0]) restaurarBackup(e.target.files[0], msg); e.target.value = ''; };
     area.querySelector('#voltar').onclick = () => mostrar('hoje');
+  },
+  async fechamento() {
+    const cfg = await DB.ler('config'), lancs = await LANC.todos();
+    if (!cfg || cfg.saldo === undefined) { area.innerHTML = '<div class="vazio"><h1>Fechamento do mês</h1><p>Termine a configuração na aba Hoje primeiro.</p></div>'; return; }
+    const atualYM = ymDe(new Date());
+    const minYM = [ymDe(new Date(cfg.saldoEm)), ...lancs.map(l => l.data.slice(0, 7))].sort()[0];
+    const ym = mesFech || atualYM, [y, m] = ym.split('-').map(Number);
+    const r = resumoMes(cfg, lancs, ym), ant = resumoMes(cfg, lancs, ymDe(new Date(y, m - 2, 1)));
+    const nomeMes = new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    const dif = r.saldo - ant.saldo;
+    const max = r.cats.length ? r.cats[0][1] : 1;
+    const corpo = !r.temDados ? '<p class="contexto">Sem movimentações neste mês.</p>' : `
+      <p class="contexto" style="margin-bottom:0">${ym === atualYM ? 'Mês em andamento · ' : ''}Resultado do mês</p>
+      <div class="gigante ${r.saldo >= 0 ? 'pos' : 'neg'}" style="font-size:48px">${brl(r.saldo)}</div>
+      <div class="lista">
+        <div><span>Salários (valor médio cadastrado)</span><span>${brl(r.fixos)}</span></div>
+        <div><span>Outras receitas recebidas</span><span>${brl(r.rec)}</span></div>
+        <div><span>Despesas pagas (${r.nPagas})</span><span>${brl(r.pagas)}</span></div>
+        <div><span>Despesas pendentes (${r.nPend})</span><span>${brl(r.pend)}</span></div>
+      </div>
+      ${r.cats.length ? `<p class="contexto" style="margin-top:22px">Maior categoria de gasto: <b>${esc(r.cats[0][0])}</b> (${brl(r.cats[0][1])})</p>` +
+        r.cats.slice(0, 6).map(([c, v]) => `<div class="cat"><div class="topo"><span>${esc(c)}</span><span>${brl(v)}</span></div><div class="barra" style="width:${Math.max(3, Math.round(v / max * 100))}%"></div></div>`).join('') : ''}
+      ${ant.temDados ? `<p class="aviso" style="margin-top:22px">${dif >= 0 ? 'Seu saldo aumentou ' + brl(dif) : 'Seu saldo ficou ' + brl(-dif) + ' menor'} em relação ao mês anterior.</p>` : ''}
+      <p class="pequeno" style="margin-top:14px">Gastos por categoria somam despesas pagas e pendentes do mês. Os salários entram pelo valor médio, não pelo valor real recebido.</p>`;
+    area.innerHTML = `<h1>Fechamento do mês</h1>
+      <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${nomeMes}</span><button id="prox" aria-label="Próximo mês" ${ym >= atualYM ? 'disabled' : ''}>›</button></div>
+      ${corpo}<button class="botao sec" id="voltar" style="margin-top:24px">Voltar</button>`;
+    area.querySelector('#ant').onclick = () => { mesFech = ymDe(new Date(y, m - 2, 1)); mostrar('fechamento'); };
+    area.querySelector('#prox').onclick = () => { mesFech = ymDe(new Date(y, m, 1)); mostrar('fechamento'); };
+    area.querySelector('#voltar').onclick = () => { mesFech = null; mostrar('hoje'); };
   },
   async comprar() {
     const cfg = await DB.ler('config');
@@ -441,8 +491,8 @@ const telas = {
       $('creg').onclick = async () => {
         const desc = $('cdesc').value.trim();
         if (!desc) return $('cerr').textContent = 'Informe o que é a compra, no campo acima, para registrar.';
-        if (n === 1) await LANC.salvar({ tipo: 'despesa', desc, valor: total, data: hojeISO(), pago: true, pagoEm: Date.now() });
-        else { const grupo = Date.now(); for (let k = 0; k < n; k++) await LANC.salvar({ tipo: 'despesa', desc: `${desc} (${k + 1}/${n})`, valor: extras[k].valor, data: isoDe(somaMes(base, k)), pago: false, pagoEm: null, grupo, parcela: k + 1, total: n }); }
+        if (n === 1) await LANC.salvar({ tipo: 'despesa', categoria: 'Compras', desc, valor: total, data: hojeISO(), pago: true, pagoEm: Date.now() });
+        else { const grupo = Date.now(); for (let k = 0; k < n; k++) await LANC.salvar({ tipo: 'despesa', categoria: 'Compras', desc: `${desc} (${k + 1}/${n})`, valor: extras[k].valor, data: isoDe(somaMes(base, k)), pago: false, pagoEm: null, grupo, parcela: k + 1, total: n }); }
         if (n > 1) filtro = 'pendentes';
         mostrar(n === 1 ? 'hoje' : 'contas');
       };
@@ -455,7 +505,7 @@ const telas = {
     const vis = filtro === 'pendentes' ? todos.filter(l => !l.pago) : todos;
     const itens = vis.map(l => `
       <div class="item ${l.pago ? 'paga' : ''}" data-id="${l.id}">
-        <div><div class="data">${dataCurta(l.data)}${l.pago ? '' : ' · pendente'}</div><div class="desc">${esc(l.desc)}</div></div>
+        <div><div class="data">${dataCurta(l.data)}${l.categoria ? ' · ' + esc(l.categoria) : ''}${l.pago ? '' : ' · pendente'}</div><div class="desc">${esc(l.desc)}</div></div>
         <div><div class="val ${l.tipo === 'receita' ? 'rec' : 'desp'}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</div>
           <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div>
       </div>`).join('');
@@ -476,6 +526,7 @@ const telas = {
 
 async function abrirLancamento(edit) {
   const sug = [...new Set((await LANC.todos()).map(l => l.desc))];
+  const ultima = await DB.ler('ultimaCategoria');
   let tipo = edit ? edit.tipo : 'despesa', pago = edit ? edit.pago : true;
   const f = document.createElement('div'); f.className = 'folha';
   f.innerHTML = `<div class="painel form">
@@ -483,6 +534,7 @@ async function abrirLancamento(edit) {
     <div class="seg" id="sTipo"><button data-v="despesa">Despesa</button><button data-v="receita">Receita</button></div>
     <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" ${edit ? `data-c="${edit.valor}"` : ''}>
     <label>Descrição</label><input id="ld" list="sug" autocomplete="off" placeholder="Ex.: Mercado" value="${edit ? esc(edit.desc) : ''}"><datalist id="sug">${sug.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+    <div id="lcatw"><label>Categoria</label><select id="lcat">${opcoesCat(edit ? (edit.categoria || 'Outros') : (ultima || 'Outros'))}</select></div>
     <label>Data</label><input id="ldt" type="date" value="${edit ? edit.data : hojeISO()}">
     <label>Situação</label><div class="seg" id="sPago"><button data-v="1"></button><button data-v="0">Pendente</button></div>
     <p class="erro" id="le" role="alert"></p>
@@ -490,6 +542,7 @@ async function abrirLancamento(edit) {
   document.body.appendChild(f);
   const $ = id => f.querySelector('#' + id);
   const pintar = () => {
+    f.querySelector('#lcatw').style.display = tipo === 'despesa' ? '' : 'none';
     f.querySelectorAll('#sTipo button').forEach(b => b.classList.toggle('on', b.dataset.v === tipo));
     f.querySelector('#sPago button[data-v="1"]').textContent = tipo === 'receita' ? 'Recebido' : 'Pago';
     f.querySelectorAll('#sPago button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === pago));
@@ -505,8 +558,10 @@ async function abrirLancamento(edit) {
     if (valor <= 0) return $('le').textContent = 'Informe um valor maior que zero.';
     if (!desc) return $('le').textContent = 'Informe uma descrição.';
     if (!data || isNaN(new Date(data + 'T00:00:00'))) return $('le').textContent = 'Escolha uma data válida.';
+    const cat = tipo === 'despesa' ? f.querySelector('#lcat').value : null;
+    if (cat) await DB.gravar('ultimaCategoria', cat);
     // Ao editar, mantém o vínculo com a recorrente/parcelas e só marca "pago agora" se passou de pendente para pago.
-    await LANC.salvar({ ...(edit || {}), tipo, desc, valor, data, pago, pagoEm: pago ? (edit && edit.pago ? (edit.pagoEm ?? null) : Date.now()) : null });
+    await LANC.salvar({ ...(edit || {}), tipo, desc, valor, data, pago, categoria: cat, pagoEm: pago ? (edit && edit.pago ? (edit.pagoEm ?? null) : Date.now()) : null });
     fechar(); mostrar(document.querySelector('nav .ativa').dataset.tela);
   };
 }
@@ -514,7 +569,7 @@ const fab = document.createElement('button'); fab.className = 'fab'; fab.textCon
 fab.onclick = abrirLancamento; document.body.appendChild(fab);
 
 async function mostrar(nome) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : nome === 'backup' ? 'hoje' : nome)));
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : (nome === 'backup' || nome === 'fechamento') ? 'hoje' : nome)));
   await telas[nome]();
   window.scrollTo(0, 0);
 }

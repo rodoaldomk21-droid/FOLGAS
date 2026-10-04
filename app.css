@@ -94,3 +94,12 @@ input:focus, select:focus { outline: 2px solid var(--destaque); outline-offset: 
 input[type=file] { display: none; }
 label.botao { display: block; text-align: center; cursor: pointer; margin: 12px 0 0; color: var(--destaque); background: none; border: 1px solid var(--linha); font-weight: 600; }
 .ok { color: var(--subida); font-weight: 600; margin-top: 16px; min-height: 1.4em; }
+/* Etapa 9 */
+.mesnav { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 18px; }
+.mesnav button { border: 1px solid var(--linha); background: none; color: var(--tinta); width: 44px; height: 44px; border-radius: 12px; font-size: 22px; }
+.mesnav button:disabled { opacity: .3; }
+.mesnav span { font-weight: 700; text-transform: capitalize; }
+.cat { margin-top: 14px; }
+.cat .topo { display: flex; justify-content: space-between; font-size: 15px; }
+.cat .barra { height: 8px; border-radius: 4px; background: var(--destaque); margin-top: 6px; }
+.pos { color: var(--subida); } .neg { color: var(--queda); }
