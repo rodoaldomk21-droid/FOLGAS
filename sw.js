@@ -1,10 +1,10 @@
-// Guarda os arquivos no iPhone para o app abrir sem internet.
-// Ao alterar qualquer arquivo, mude o número da versão abaixo.
-const VERSAO = 'folga-v4';
+// Estratégia: tenta a internet primeiro (sempre pega a versão nova) e usa o cache só se estiver offline.
+// Ao alterar qualquer arquivo do app, mude o número da versão abaixo.
+const VERSAO = 'folga-v6';
 const ARQUIVOS = ['./', 'index.html', 'manifest.json', 'app.css', 'app.js', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSAO).then(c => c.addAll(ARQUIVOS)));
+  e.waitUntil(caches.open(VERSAO).then(c => Promise.all(ARQUIVOS.map(a => c.add(new Request(a, { cache: 'reload' }))))));
   self.skipWaiting();
 });
 self.addEventListener('activate', e => {
@@ -12,5 +12,10 @@ self.addEventListener('activate', e => {
   self.clients.claim();
 });
 self.addEventListener('fetch', e => {
-  e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+  if (e.request.method !== 'GET') return;
+  e.respondWith(
+    fetch(e.request, { cache: 'no-cache' })
+      .then(r => { const copia = r.clone(); caches.open(VERSAO).then(c => c.put(e.request, copia)); return r; })
+      .catch(() => caches.match(e.request))
+  );
 });

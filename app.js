@@ -67,10 +67,52 @@ const PADRAO = {
   ]
 };
 
+/* ---------- Motor de projeção ---------- */
+// Saldo atual = saldo informado + receitas recebidas - despesas pagas DEPOIS do momento em que o saldo foi informado.
+function saldoDe(cfg, lancs) {
+  return cfg.saldo + lancs.filter(l => l.pago && (l.pagoEm || 0) >= cfg.saldoEm)
+    .reduce((t, l) => t + (l.tipo === 'receita' ? l.valor : -l.valor), 0);
+}
+
+// Projeta o saldo dia a dia, de hoje até o próximo recebimento. 'extras' = compras hipotéticas [{i: dia, valor}] (Etapa 5).
+function projetar(cfg, lancs, extras = []) {
+  const h = new Date(); const hoje0 = new Date(h.getFullYear(), h.getMonth(), h.getDate());
+  const amanha = new Date(h.getFullYear(), h.getMonth(), h.getDate() + 1);
+  const idx = d => Math.round((d - hoje0) / 864e5);
+  const datas = cfg.recebimentos.map(r => ({ ...r, data: proximaData(r.dia, amanha) }));
+  const fim = datas.reduce((a, r) => (r.data < a ? r.data : a), datas[0].data);
+  const dias = idx(fim);
+  const saldoAtual = saldoDe(cfg, lancs);
+  const delta = new Array(dias + 1).fill(0);
+  let comprometido = 0; // despesas pendentes que vencem antes do próximo recebimento
+  datas.forEach(r => { const i = idx(r.data); if (i <= dias) delta[i] += r.minimo; });
+  const saidas = lancs.filter(l => l.tipo === 'despesa' && !l.pago).map(l => ({ i: Math.max(0, idx(new Date(l.data + 'T00:00:00'))), valor: l.valor })).concat(extras);
+  saidas.forEach(x => { if (x.i <= dias) delta[x.i] -= x.valor; if (x.i < dias) comprometido += x.valor; });
+  let s = saldoAtual; const curva = delta.map(d => (s += d));
+  const livre = Math.floor((saldoAtual - comprometido - cfg.margem) / dias);
+  let iMin = 0; for (let i = 1; i < dias; i++) if (curva[i] < curva[iMin]) iMin = i;
+  const dMin = new Date(hoje0.getFullYear(), hoje0.getMonth(), hoje0.getDate() + iMin);
+  return { saldoAtual, dias, fim, curva, livre, comprometido, aperto: { dia: dMin.getDate(), valor: curva[iMin] } };
+}
+
+function curvaSVG(curva, margem) {
+  const n = curva.length - 1, W = 360, X0 = 20, XW = 320, Y0 = 14, YH = 92;
+  const lo = Math.min(...curva, margem), hi = Math.max(...curva, margem), r = hi - lo || 1;
+  const x = i => X0 + (i * XW) / n, y = v => Y0 + (1 - (v - lo) / r) * YH;
+  let d = `M${x(0)} ${y(curva[0])}`;
+  for (let i = 1; i <= n; i++) d += ` L${x(i)} ${y(curva[i - 1])} L${x(i)} ${y(curva[i])}`; // degraus: o saldo muda no dia do evento
+  const pontos = curva.map((v, i) => (i < n && v < margem ? `<circle class="aperto" cx="${x(i)}" cy="${y(v)}" r="4"/>` : '')).join('');
+  return `<svg class="curva" viewBox="0 0 ${W} 140" role="img" aria-label="Saldo projetado até o próximo recebimento">
+    <line class="margem" x1="${X0}" x2="${X0 + XW}" y1="${y(margem)}" y2="${y(margem)}"/>
+    <text class="rotulo" x="${X0}" y="${y(margem) - 4}">margem</text>
+    <path class="linha" d="${d}"/>${pontos}
+    <text class="eixo" x="${X0}" y="128">hoje</text><text class="eixo" x="${X0 + XW}" y="128" text-anchor="end">recebimento</text></svg>`;
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
-function formConfig(cfg) {
+function formConfig(cfg, saldoAtual) {
   const c = cfg || { nomes: { eu: '', esposa: '' }, ...PADRAO };
   const linhas = c.recebimentos.map((r, i) => `
     <div class="bloco" data-i="${i}">
@@ -87,11 +129,13 @@ function formConfig(cfg) {
   area.innerHTML = `
     <div class="form">
       <h2>${cfg ? 'Seus recebimentos' : 'Vamos configurar'}</h2>
-      <p class="intro">O <b>mínimo</b> é o que costuma vir no pior caso. O <b>médio</b> é o valor típico. O app planeja com o mínimo.</p>
+      ${cfg && saldoAtual == null ? '<p class="aviso" style="margin-bottom:16px">Novidade: informe o saldo de hoje para o app calcular quanto você pode gastar.</p>' : ''}<p class="intro">O <b>mínimo</b> é o que costuma vir no pior caso. O <b>médio</b> é o valor típico. O app planeja com o mínimo.</p>
       <label>Seu nome</label><input id="nomeEu" value="${esc(c.nomes.eu)}" autocomplete="off">
       <label>Nome da sua esposa</label><input id="nomeEsposa" value="${esc(c.nomes.esposa)}" autocomplete="off">
       <label>Margem de segurança (o saldo não deve ficar abaixo disto)</label>
       <input id="margem" inputmode="numeric" data-c="${c.margem}">
+      <label>Saldo de hoje (todas as contas e dinheiro somados)</label>
+      <input id="saldo" inputmode="numeric" placeholder="R$ 0,00" data-c="${saldoAtual == null ? '' : saldoAtual}">
       ${linhas}
       <p class="erro" id="erro" role="alert"></p>
       <button class="botao" id="salvar">Salvar</button>
@@ -119,7 +163,13 @@ async function salvarConfig() {
     recebimentos.push({ quem: b.querySelector('.quem').value, dia, minimo, medio });
   }
   const margem = +(document.getElementById('margem').dataset.c || 0);
-  await DB.gravar('config', { nomes: { eu, esposa }, margem, recebimentos });
+  const sRaw = document.getElementById('saldo').dataset.c;
+  if (sRaw === undefined || sRaw === '') return erro('Informe o saldo de hoje (use R$ 0,00 se estiver zerado).');
+  const antigo = await DB.ler('config'), lancs = await LANC.todos();
+  let saldo = antigo && antigo.saldo, saldoEm = antigo && antigo.saldoEm;
+  const novo = +sRaw;
+  if (saldo === undefined || novo !== saldoDe(antigo, lancs)) { saldo = novo; saldoEm = Date.now(); } // só vira novo ponto de partida se você alterou o valor
+  await DB.gravar('config', { nomes: { eu, esposa }, margem, recebimentos, saldo, saldoEm });
   mostrar('hoje');
 }
 
@@ -128,7 +178,10 @@ const telas = {
   async hoje() {
     const cfg = await DB.ler('config');
     if (!cfg) return formConfig(null);
-    const pend = (await LANC.todos()).filter(l => l.tipo === 'despesa' && !l.pago);
+    if (cfg.saldo === undefined) return formConfig(cfg, null);
+    const lancs = await LANC.todos();
+    const p = projetar(cfg, lancs);
+    const pend = lancs.filter(l => l.tipo === 'despesa' && !l.pago);
     const totalPend = pend.reduce((t, l) => t + l.valor, 0);
     const hoje = new Date();
     const lista = cfg.recebimentos
@@ -139,19 +192,23 @@ const telas = {
         const quando = dias === 0 ? 'hoje' : dias === 1 ? 'amanhã' : `em ${dias} dias`;
         return `<div><span>Dia ${r.data.getDate()} · ${esc(cfg.nomes[r.quem])}</span><span>${brl(r.minimo)}<br>${quando}</span></div>`;
       }).join('');
+    const falta = p.livre < 0;
+    const ctx = falta
+      ? `Faltam ${brl(-p.livre * p.dias)} para cobrir as contas e a margem até o dia ${p.fim.getDate()}.`
+      : `Até o dia ${p.fim.getDate()} (${p.dias} ${p.dias === 1 ? 'dia' : 'dias'}). Saldo hoje: ${brl(p.saldoAtual)}.`;
+    const apertoTxt = p.aperto.valor < cfg.margem
+      ? `Dia ${p.aperto.dia} é o mais apertado: o saldo cai para ${brl(p.aperto.valor)}, abaixo da sua margem.`
+      : `Dia ${p.aperto.dia} é o mais apertado: sobram ${brl(p.aperto.valor)}.`;
     area.innerHTML = `
-      <h1>Olá, ${esc(cfg.nomes.eu)}</h1>
-      <div class="gigante"><small>R$</small>48</div>
-      <p class="contexto">Exemplo: este valor ainda não é calculado com os seus dados.</p>
-      <svg class="curva" viewBox="0 0 360 120" role="img" aria-label="Curva de exemplo do saldo">
-        <line class="margem" x1="20" x2="340" y1="80" y2="80"/>
-        <path class="linha" d="M20 90 L60 82 L100 68 L140 72 L180 50 L220 56 L260 78 L300 64 L340 60"/>
-        <circle class="aperto" cx="180" cy="70" r="5"/>
-      </svg>
-      <p class="aviso">Contas pendentes: <b>${pend.length}</b> · ${brl(totalPend)}</p>
+      <h1>Olá, ${esc(cfg.nomes.eu)}. Hoje você pode gastar</h1>
+      <div class="gigante"><small>R$</small>${Math.floor(Math.max(p.livre, 0) / 100)}</div>
+      <p class="contexto ${falta ? 'alerta' : ''}">${ctx}</p>
+      ${curvaSVG(p.curva, cfg.margem)}
+      <p class="contexto">${apertoTxt}</p>
+      <p class="aviso">Contas pendentes: <b>${pend.length}</b> · ${brl(totalPend)}. O cálculo usa o valor mínimo dos recebimentos.</p>
       <div class="lista"><h1>Próximos recebimentos (valor mínimo)</h1>${lista}</div>
-      <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos</button>`;
-    document.getElementById('editar').onclick = () => formConfig(cfg);
+      <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>`;
+    document.getElementById('editar').onclick = () => formConfig(cfg, p.saldoAtual);
   },
   async comprar() { area.innerHTML = `<div class="vazio"><h1>Posso comprar?</h1><div class="gigante" style="font-size:40px">Em breve</div><p>Aqui você vai digitar um valor, à vista ou parcelado, e ver se cabe antes de comprar.</p></div>`; },
   async contas() {
@@ -169,7 +226,7 @@ const telas = {
     area.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; mostrar('contas'); });
     area.querySelectorAll('.item').forEach(el => {
       const l = todos.find(x => x.id === +el.dataset.id);
-      el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; await LANC.salvar(l); mostrar('contas'); };
+      el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); mostrar('contas'); };
       el.querySelector('[data-a=del]').onclick = async () => { if (confirm('Excluir "' + l.desc + '"?')) { await LANC.apagar(l.id); mostrar('contas'); } };
     });
   }
@@ -205,7 +262,7 @@ async function abrirLancamento() {
     if (valor <= 0) return $('le').textContent = 'Informe um valor maior que zero.';
     if (!desc) return $('le').textContent = 'Informe uma descrição.';
     if (!data || isNaN(new Date(data + 'T00:00:00'))) return $('le').textContent = 'Escolha uma data válida.';
-    await LANC.salvar({ tipo, desc, valor, data, pago });
+    await LANC.salvar({ tipo, desc, valor, data, pago, pagoEm: pago ? Date.now() : null });
     fechar(); mostrar(document.querySelector('nav .ativa').dataset.tela);
   };
 }
