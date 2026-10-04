@@ -457,7 +457,7 @@ const telas = {
       <div class="item ${l.pago ? 'paga' : ''}" data-id="${l.id}">
         <div><div class="data">${dataCurta(l.data)}${l.pago ? '' : ' · pendente'}</div><div class="desc">${esc(l.desc)}</div></div>
         <div><div class="val ${l.tipo === 'receita' ? 'rec' : 'desp'}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</div>
-          <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="del">Excluir</button></div></div>
+          <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div>
       </div>`).join('');
     area.innerHTML = `<h1>Contas</h1>
       <button class="botao sec" id="rec" style="margin-top:12px">Contas recorrentes</button>
@@ -467,21 +467,23 @@ const telas = {
     area.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; mostrar('contas'); });
     area.querySelectorAll('.item').forEach(el => {
       const l = todos.find(x => x.id === +el.dataset.id);
+      el.querySelector('[data-a=ed]').onclick = () => abrirLancamento(l);
       el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); mostrar('contas'); };
       el.querySelector('[data-a=del]').onclick = async () => { if (confirm('Excluir "' + l.desc + '"?')) { await LANC.apagar(l.id); mostrar('contas'); } };
     });
   }
 };
 
-async function abrirLancamento() {
+async function abrirLancamento(edit) {
   const sug = [...new Set((await LANC.todos()).map(l => l.desc))];
-  let tipo = 'despesa', pago = true;
+  let tipo = edit ? edit.tipo : 'despesa', pago = edit ? edit.pago : true;
   const f = document.createElement('div'); f.className = 'folha';
   f.innerHTML = `<div class="painel form">
+    ${edit ? '<h2>Editar lançamento</h2>' : ''}
     <div class="seg" id="sTipo"><button data-v="despesa">Despesa</button><button data-v="receita">Receita</button></div>
-    <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00">
-    <label>Descrição</label><input id="ld" list="sug" autocomplete="off" placeholder="Ex.: Mercado"><datalist id="sug">${sug.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
-    <label>Data</label><input id="ldt" type="date" value="${hojeISO()}">
+    <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" ${edit ? `data-c="${edit.valor}"` : ''}>
+    <label>Descrição</label><input id="ld" list="sug" autocomplete="off" placeholder="Ex.: Mercado" value="${edit ? esc(edit.desc) : ''}"><datalist id="sug">${sug.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+    <label>Data</label><input id="ldt" type="date" value="${edit ? edit.data : hojeISO()}">
     <label>Situação</label><div class="seg" id="sPago"><button data-v="1"></button><button data-v="0">Pendente</button></div>
     <p class="erro" id="le" role="alert"></p>
     <button class="botao" id="ls">Salvar</button><button class="botao sec" id="lc">Cancelar</button></div>`;
@@ -503,7 +505,8 @@ async function abrirLancamento() {
     if (valor <= 0) return $('le').textContent = 'Informe um valor maior que zero.';
     if (!desc) return $('le').textContent = 'Informe uma descrição.';
     if (!data || isNaN(new Date(data + 'T00:00:00'))) return $('le').textContent = 'Escolha uma data válida.';
-    await LANC.salvar({ tipo, desc, valor, data, pago, pagoEm: pago ? Date.now() : null });
+    // Ao editar, mantém o vínculo com a recorrente/parcelas e só marca "pago agora" se passou de pendente para pago.
+    await LANC.salvar({ ...(edit || {}), tipo, desc, valor, data, pago, pagoEm: pago ? (edit && edit.pago ? (edit.pagoEm ?? null) : Date.now()) : null });
     fechar(); mostrar(document.querySelector('nav .ativa').dataset.tela);
   };
 }
