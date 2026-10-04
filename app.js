@@ -145,6 +145,69 @@ function curvaDupla(a, b, margem) {
     <text class="eixo" x="${X0}" y="128">hoje</text><text class="eixo" x="${X0 + XW}" y="128" text-anchor="end">${n} dias</text></svg>`;
 }
 
+/* ---------- Contas recorrentes ---------- */
+// Cada recorrente guarda: desc, valor, freq (mensal/semanal/anual), inicio (um vencimento) e 'gerados' (datas já criadas).
+const FREQ = { mensal: 'Todo mês', semanal: 'Toda semana', anual: 'Todo ano' };
+function ocorrencia(r, k) {
+  const ini = new Date(r.inicio + 'T00:00:00');
+  return r.freq === 'semanal' ? new Date(ini.getFullYear(), ini.getMonth(), ini.getDate() + 7 * k) : somaMes(ini, r.freq === 'anual' ? 12 * k : k);
+}
+function proximaOcorrencia(r) { for (let k = 0; k < 2000; k++) { const d = ocorrencia(r, k); if (diasAte(d) >= 0) return d; } }
+
+// Cria lançamentos pendentes dos próximos 120 dias. Roda ao abrir o app e é segura para repetir (não duplica).
+async function gerarRecorrentes() {
+  const lista = (await DB.ler('recorrentes')) || [];
+  let mudou = false;
+  for (const r of lista) {
+    for (let k = 0; k < 2000; k++) {
+      const d = ocorrencia(r, k), i = diasAte(d);
+      if (i > 120) break;
+      const iso = isoDe(d);
+      if (i < 0 || r.gerados.includes(iso)) continue;
+      await LANC.salvar({ tipo: 'despesa', desc: r.desc, valor: r.valor, data: iso, pago: false, pagoEm: null, recorrenteId: r.id });
+      r.gerados.push(iso); mudou = true;
+    }
+  }
+  if (mudou) await DB.gravar('recorrentes', lista);
+}
+
+// Apaga os lançamentos futuros ainda não pagos desta recorrente e devolve a lista de datas que continuam valendo.
+async function limparFuturos(r) {
+  const meus = (await LANC.todos()).filter(l => l.recorrenteId === r.id);
+  const futuros = meus.filter(l => !l.pago && l.data >= hojeISO());
+  for (const l of futuros) await LANC.apagar(l.id);
+  return meus.filter(l => !futuros.includes(l)).map(l => l.data);
+}
+
+function formRec(r) {
+  const c = r ? { ...r, inicio: isoDe(proximaOcorrencia(r)) } : { desc: '', valor: 0, freq: 'mensal', inicio: hojeISO() };
+  area.innerHTML = `<div class="form"><h2>${r ? 'Editar recorrente' : 'Nova recorrente'}</h2>
+    <p class="intro">Ela cria sozinha os próximos lançamentos (até 4 meses à frente). Para contas de valor variável, use o valor médio.</p>
+    <label>Descrição</label><input id="rd" value="${esc(c.desc)}" placeholder="Ex.: Aluguel" autocomplete="off">
+    <label>Valor</label><input id="rv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" data-c="${c.valor || ''}">
+    <label>Repete</label><select id="rf">${Object.entries(FREQ).map(([k, v]) => `<option value="${k}" ${c.freq === k ? 'selected' : ''}>${v}</option>`).join('')}</select>
+    <label>Próximo vencimento</label><input id="ri" type="date" value="${c.inicio}">
+    <p class="erro" id="re" role="alert"></p>
+    <button class="botao" id="rs">Salvar</button><button class="botao sec" id="rc">Cancelar</button></div>`;
+  const $ = id => area.querySelector('#' + id);
+  ligarDinheiro($('rv'));
+  $('rc').onclick = () => mostrar('recorrentes');
+  $('rs').onclick = async () => {
+    const desc = $('rd').value.trim(), valor = +($('rv').dataset.c || 0), freq = $('rf').value, inicio = $('ri').value;
+    const erro = m => { $('re').textContent = m; };
+    if (!desc) return erro('Informe a descrição.');
+    if (valor <= 0) return erro('Informe um valor maior que zero.');
+    if (!inicio || isNaN(new Date(inicio + 'T00:00:00'))) return erro('Escolha uma data válida.');
+    if (inicio < hojeISO()) return erro('O vencimento não pode estar no passado.');
+    const lista = (await DB.ler('recorrentes')) || [];
+    if (r) { const x = lista.find(y => y.id === r.id); x.gerados = await limparFuturos(x); Object.assign(x, { desc, valor, freq, inicio }); }
+    else lista.push({ id: Date.now(), desc, valor, freq, inicio, gerados: [] });
+    await DB.gravar('recorrentes', lista);
+    await gerarRecorrentes();
+    mostrar('recorrentes');
+  };
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -246,6 +309,28 @@ const telas = {
       <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>`;
     document.getElementById('editar').onclick = () => formConfig(cfg, p.saldoAtual);
   },
+  async recorrentes() {
+    const lista = (await DB.ler('recorrentes')) || [];
+    const itens = lista.map(r => { const p = proximaOcorrencia(r); return `
+      <div class="item" data-id="${r.id}"><div><div class="data">${FREQ[r.freq]} · próximo ${dataCurta(isoDe(p))}</div><div class="desc">${esc(r.desc)}</div></div>
+        <div><div class="val desp">${brl(r.valor)}</div><div class="acoes"><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div></div>`; }).join('');
+    area.innerHTML = `<h1>Contas recorrentes</h1>
+      <button class="botao" id="nova" style="margin:14px 0 6px">Nova recorrente</button>
+      ${itens || '<p class="contexto" style="margin-top:20px">Nenhuma ainda. Cadastre aluguel, internet, assinaturas e outras contas que se repetem.</p>'}
+      <button class="botao sec" id="voltar" style="margin-top:20px">Voltar para Contas</button>`;
+    area.querySelector('#nova').onclick = () => formRec(null);
+    area.querySelector('#voltar').onclick = () => mostrar('contas');
+    area.querySelectorAll('.item').forEach(el => {
+      const r = lista.find(x => x.id === +el.dataset.id);
+      el.querySelector('[data-a=ed]').onclick = () => formRec(r);
+      el.querySelector('[data-a=del]').onclick = async () => {
+        if (!confirm('Excluir "' + r.desc + '" e os próximos lançamentos pendentes dela?')) return;
+        await limparFuturos(r);
+        await DB.gravar('recorrentes', lista.filter(x => x.id !== r.id));
+        mostrar('recorrentes');
+      };
+    });
+  },
   async comprar() {
     const cfg = await DB.ler('config');
     if (!cfg || cfg.saldo === undefined) { area.innerHTML = '<div class="vazio"><h1>Posso comprar?</h1><p>Termine a configuração na aba Hoje primeiro.</p></div>'; return; }
@@ -310,8 +395,10 @@ const telas = {
           <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="del">Excluir</button></div></div>
       </div>`).join('');
     area.innerHTML = `<h1>Contas</h1>
+      <button class="botao sec" id="rec" style="margin-top:12px">Contas recorrentes</button>
       <div class="filtros"><button data-f="pendentes" class="${filtro === 'pendentes' ? 'on' : ''}">Pendentes</button><button data-f="todos" class="${filtro === 'todos' ? 'on' : ''}">Todas</button></div>
       ${itens || '<p class="contexto" style="margin-top:24px">Nada por aqui. Toque no + para lançar.</p>'}`;
+    area.querySelector('#rec').onclick = () => mostrar('recorrentes');
     area.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; mostrar('contas'); });
     area.querySelectorAll('.item').forEach(el => {
       const l = todos.find(x => x.id === +el.dataset.id);
@@ -359,12 +446,12 @@ const fab = document.createElement('button'); fab.className = 'fab'; fab.textCon
 fab.onclick = abrirLancamento; document.body.appendChild(fab);
 
 async function mostrar(nome) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === nome));
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : nome)));
   await telas[nome]();
   window.scrollTo(0, 0);
 }
 document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => mostrar(b.dataset.tela)));
-mostrar('hoje');
+gerarRecorrentes().catch(() => {}).then(() => mostrar('hoje'));
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); // pede ao iOS para não apagar os dados
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
