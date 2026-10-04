@@ -1,0 +1,42 @@
+:root {
+  --fundo: #F2F5F7; --papel: #FFFFFF; --tinta: #14232B; --suave: #62747E;
+  --linha: #D8E0E5; --destaque: #2B45E0; --queda: #C2410C; --subida: #0F7B5F;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --fundo: #0E1620; --papel: #16212D; --tinta: #E8EEF2; --suave: #8DA0AC;
+          --linha: #263544; --destaque: #7C93FF; --queda: #FB923C; --subida: #34D399; }
+}
+* { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+  background: var(--fundo); color: var(--tinta);
+  font: 17px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  padding-top: env(safe-area-inset-top);
+}
+main { padding: 28px 22px 120px; max-width: 520px; margin: 0 auto; }
+h1 { font-size: 15px; font-weight: 500; color: var(--suave); }
+.gigante {
+  font-size: clamp(64px, 22vw, 96px); font-weight: 700; letter-spacing: -0.04em;
+  line-height: 1; margin: 6px 0 4px; font-variant-numeric: tabular-nums;
+}
+.gigante small { font-size: 0.35em; font-weight: 600; letter-spacing: 0; margin-right: 6px; color: var(--suave); }
+.contexto { color: var(--suave); margin-bottom: 28px; }
+.curva { width: 100%; height: auto; display: block; margin-bottom: 8px; }
+.curva .linha { fill: none; stroke: var(--destaque); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.curva .margem { stroke: var(--queda); stroke-width: 1.5; stroke-dasharray: 4 5; }
+.curva .eixo { fill: var(--suave); font-size: 11px; }
+.curva .aperto { fill: var(--queda); }
+.aviso { margin-top: 24px; padding: 14px 16px; border-left: 3px solid var(--destaque); background: var(--papel); border-radius: 0 10px 10px 0; color: var(--suave); font-size: 15px; }
+.vazio { margin-top: 40px; }
+.vazio p { color: var(--suave); margin-top: 8px; }
+nav {
+  position: fixed; left: 0; right: 0; bottom: 0; display: flex;
+  background: var(--papel); border-top: 1px solid var(--linha);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+nav button {
+  flex: 1; border: 0; background: none; color: var(--suave);
+  font: 600 14px/1 -apple-system, system-ui, sans-serif; padding: 18px 4px;
+}
+nav button.ativa { color: var(--destaque); box-shadow: inset 0 3px 0 var(--destaque); }
+@media (prefers-reduced-motion: no-preference) { nav button { transition: color .15s; } }
