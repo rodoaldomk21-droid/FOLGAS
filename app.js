@@ -85,7 +85,7 @@ function projetar(cfg, lancs, extras = []) {
   const saldoAtual = saldoDe(cfg, lancs);
   const delta = new Array(dias + 1).fill(0);
   let comprometido = 0; // despesas pendentes que vencem antes do próximo recebimento
-  datas.forEach(r => { const i = idx(r.data); if (i <= dias) delta[i] += r.minimo; });
+  datas.forEach(r => { const i = idx(r.data); if (i <= dias) delta[i] += previsaoDe(cfg, lancs, r, r.data).min; });
   const saidas = lancs.filter(l => l.tipo === 'despesa' && !l.pago).map(l => ({ i: Math.max(0, idx(new Date(l.data + 'T00:00:00'))), valor: l.valor })).concat(extras);
   saidas.forEach(x => { if (x.i <= dias) delta[x.i] -= x.valor; if (x.i < dias) comprometido += x.valor; });
   let s = saldoAtual; const curva = delta.map(d => (s += d));
@@ -123,8 +123,8 @@ function projetarLongo(cfg, lancs, extras = [], horizonte = 90) {
   cfg.recebimentos.forEach(r => {
     for (let m = 0; m < 5; m++) {
       const ult = new Date(h.getFullYear(), h.getMonth() + m + 1, 0).getDate();
-      const i = diasAte(new Date(h.getFullYear(), h.getMonth() + m, Math.min(r.dia, ult)));
-      if (i >= 1 && i <= horizonte) delta[i] += r.minimo;
+      const dd = new Date(h.getFullYear(), h.getMonth() + m, Math.min(r.dia, ult)), i = diasAte(dd);
+      if (i >= 1 && i <= horizonte) delta[i] += previsaoDe(cfg, lancs, r, dd).min;
     }
   });
   lancs.filter(l => l.tipo === 'despesa' && !l.pago).forEach(l => { const i = Math.max(0, diasAte(new Date(l.data + 'T00:00:00'))); if (i <= horizonte) delta[i] -= l.valor; });
@@ -167,7 +167,7 @@ async function gerarRecorrentes() {
       if (i > 120) break;
       const iso = isoDe(d);
       if (i < 0 || r.gerados.includes(iso) || existentes.some(l => l.recorrenteId === r.id && l.data === iso)) continue;
-      await LANC.salvar({ tipo: 'despesa', desc: r.desc, valor: r.valor, data: iso, pago: false, pagoEm: null, recorrenteId: r.id, categoria: r.categoria || 'Contas' });
+      await LANC.salvar({ tipo: 'despesa', desc: r.desc, valor: valorAprendido(r, existentes), data: iso, pago: false, pagoEm: null, recorrenteId: r.id, auto: true, categoria: r.categoria || 'Contas' });
       r.gerados.push(iso); mudou = true;
     }
   }
@@ -204,7 +204,7 @@ function formRec(r) {
     if (!inicio || isNaN(new Date(inicio + 'T00:00:00'))) return erro('Escolha uma data válida.');
     if (inicio < hojeISO()) return erro('O vencimento não pode estar no passado.');
     const lista = (await DB.ler('recorrentes')) || [];
-    if (r) { const x = lista.find(y => y.id === r.id); x.gerados = await limparFuturos(x); Object.assign(x, { desc, valor, freq, inicio, categoria }); }
+    if (r) { const x = lista.find(y => y.id === r.id); x.gerados = await limparFuturos(x); (valor !== x.valor && (x.aprendeDesde = hojeISO()), Object.assign(x, { desc, valor, freq, inicio, categoria })); }
     else lista.push({ id: Date.now(), desc, valor, freq, inicio, categoria, gerados: [] });
     await DB.gravar('recorrentes', lista);
     await gerarRecorrentes();
@@ -222,13 +222,14 @@ function validarBackup(b) {
   if (!Array.isArray(b.lancamentos) || !b.lancamentos.every(l => ['despesa', 'receita'].includes(l.tipo) && typeof l.desc === 'string' && int(l.valor) && l.valor > 0 && dataOk(l.data) && typeof l.pago === 'boolean')) return 'Há lançamentos inválidos no backup.';
   if (!Array.isArray(b.recorrentes) || !b.recorrentes.every(r => int(r.id) && typeof r.desc === 'string' && int(r.valor) && r.valor > 0 && FREQ[r.freq] && dataOk(r.inicio) && Array.isArray(r.gerados))) return 'Há contas recorrentes inválidas no backup.';
   if (b.recebIgnorados !== undefined && !(Array.isArray(b.recebIgnorados) && b.recebIgnorados.every(x => typeof x === 'string'))) return 'Os recebimentos ignorados do backup são inválidos.';
+  if (b.previsoes !== undefined && (typeof b.previsoes !== 'object' || Array.isArray(b.previsoes) || !Object.values(b.previsoes).every(v => Number.isInteger(v) && v >= 0))) return 'As previsões ajustadas do backup são inválidas.';
   return null;
 }
 
 async function exportarBackup(msg) {
   const cfg = await DB.ler('config');
   if (!cfg || cfg.saldo === undefined) return msg('Termine a configuração na aba Hoje antes de fazer backup.', true);
-  const dados = { app: 'folga', versao: 1, exportadoEm: new Date().toISOString(), config: cfg, recorrentes: (await DB.ler('recorrentes')) || [], recebIgnorados: (await DB.ler('recebIgnorados')) || [], lancamentos: await LANC.todos() };
+  const dados = { app: 'folga', versao: 1, exportadoEm: new Date().toISOString(), config: cfg, recorrentes: (await DB.ler('recorrentes')) || [], recebIgnorados: (await DB.ler('recebIgnorados')) || [], previsoes: (await DB.ler('previsoes')) || {}, lancamentos: await LANC.todos() };
   const nome = `folga-backup-${hojeISO()}.json`;
   const arquivo = new File([JSON.stringify(dados, null, 1)], nome, { type: 'application/json' });
   try {
@@ -245,16 +246,17 @@ async function restaurarBackup(arquivo, msg) {
   const erro = validarBackup(b);
   if (erro) return msg(erro + ' Nada foi alterado.', true);
   if (!confirm(`Restaurar vai SUBSTITUIR todos os dados atuais por este backup (${b.lancamentos.length} lançamentos, feito em ${new Date(b.exportadoEm).toLocaleDateString('pt-BR')}). Continuar?`)) return msg('Restauração cancelada. Nada foi alterado.');
-  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'categoria', 'recebKey', 'grupo', 'parcela', 'total'];
+  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'categoria', 'recebKey', 'auto', 'grupo', 'parcela', 'total'];
   const limpos = b.lancamentos.map(l => Object.fromEntries(campos.filter(k => l[k] !== undefined).map(k => [k, l[k]])));
   const d = await DB.abrir();
   try {
     await new Promise((ok, falha) => { // tudo ou nada: se algo falhar, os dados atuais ficam intactos
       const t = d.transaction(['config', 'lancamentos'], 'readwrite'), c = t.objectStore('config'), l = t.objectStore('lancamentos');
-      l.clear(); c.put(b.config, 'config'); c.put(b.recorrentes, 'recorrentes'); c.put(b.recebIgnorados || [], 'recebIgnorados'); limpos.forEach(x => l.put(x));
+      l.clear(); c.put(b.config, 'config'); c.put(b.recorrentes, 'recorrentes'); c.put(b.recebIgnorados || [], 'recebIgnorados'); c.put(b.previsoes || {}, 'previsoes'); limpos.forEach(x => l.put(x));
       t.oncomplete = ok; t.onerror = t.onabort = () => falha(t.error);
     });
   } catch { return msg('Falha ao restaurar. Seus dados atuais foram mantidos.', true); }
+  PREV = b.previsoes || {};
   await gerarRecorrentes();
   mostrar('hoje');
 }
@@ -270,7 +272,7 @@ function resumoMes(cfg, lancs, ym, ignorados = []) {
     if (!(ym > iniYM || (ym === iniYM && r.dia >= ini.getDate()))) return false;
     const key = `${r.quem}${r.dia}-${isoDe(new Date(yy, mm - 1, Math.min(r.dia, new Date(yy, mm, 0).getDate())))}`;
     return !lancs.some(l => l.recebKey === key) && !ignorados.includes(key); // confirmado/ignorado não é mais estimativa
-  }).reduce((t, r) => t + r.medio, 0);
+  }).reduce((t, r) => t + previsaoDe(cfg, lancs, r, new Date(yy, mm - 1, Math.min(r.dia, new Date(yy, mm, 0).getDate()))).med, 0);
   const soma = a => a.reduce((t, l) => t + l.valor, 0);
   const rec = soma(doMes.filter(l => l.tipo === 'receita' && l.pago));
   const desp = doMes.filter(l => l.tipo === 'despesa'), pagas = desp.filter(l => l.pago), pend = desp.filter(l => !l.pago);
@@ -357,6 +359,7 @@ const emReais = c => Math.round(c / 100) * 100;
 // Sugere ajustar salários (a partir das confirmações) e contas recorrentes (a partir do que foi pago)
 function sugestoesAjuste(cfg, lancs, recs, dispensadas) {
   const sug = [];
+  return sug; // substituída pelo aprendizado automático (previsaoDe e valorAprendido)
   cfg.recebimentos.forEach((r, i) => {
     const id = r.quem + r.dia;
     const reais = lancs.filter(l => l.recebKey && l.recebKey.split('-')[0] === id).sort((a, b) => b.data.localeCompare(a.data)).slice(0, 6).map(l => l.valor);
@@ -432,7 +435,63 @@ async function registrarAtalho(g) {
     ['Editar', () => abrirLancamento(l)]]);
 }
 
+/* ---------- Previsões aprendidas ---------- */
+let PREV = {}; // ajustes manuais por ocorrência: { 'eu5-2026-11-05': valorEmCentavos }
+const chaveReceb = (r, d) => `${r.quem}${r.dia}-${isoDe(d)}`;
+const dataDoMes = (r, ano, mes) => new Date(ano, mes, Math.min(r.dia, new Date(ano, mes + 1, 0).getDate()));
+
+// Valor previsto de um pagamento fixo: ajuste manual > aprendido com as confirmações > cadastro
+function previsaoDe(cfg, lancs, r, d, ignorarAjuste = false) {
+  const reais = lancs.filter(l => l.recebKey && l.recebKey.split('-')[0] === r.quem + r.dia && (!r.aprendeDesde || l.data >= r.aprendeDesde))
+    .sort((a, b) => b.data.localeCompare(a.data)).slice(0, 6).map(l => l.valor);
+  if (d && !ignorarAjuste) { const v = PREV[chaveReceb(r, d)]; if (v !== undefined) return { min: v, med: v, fonte: 'ajustado', n: reais.length }; }
+  if (reais.length >= 2) { const min = Math.min(...reais.slice(0, 4)); return { min, med: Math.max(emReais(media(reais)), min), fonte: 'aprendido', n: reais.length }; }
+  return { min: r.minimo, med: r.medio, fonte: 'cadastro', n: reais.length };
+}
+// Valor previsto de uma conta recorrente: média das últimas 3 pagas (a partir de 2), senão o cadastro
+function valorAprendido(r, lancs) {
+  const pagas = lancs.filter(l => l.recorrenteId === r.id && l.pago && (!r.aprendeDesde || l.data >= r.aprendeDesde)).sort((a, b) => b.data.localeCompare(a.data)).slice(0, 3).map(l => l.valor);
+  return pagas.length >= 2 ? emReais(media(pagas)) : r.valor;
+}
+// Reajusta contas futuras geradas automaticamente (as que você editou à mão não mudam)
+async function reajustarAutomaticos() {
+  const recs = (await DB.ler('recorrentes')) || [], lancs = await LANC.todos(), hojeI = hojeISO();
+  for (const r of recs) {
+    const alvo = valorAprendido(r, lancs);
+    for (const l of lancs.filter(x => x.recorrenteId === r.id && x.auto && !x.pago && x.data >= hojeI && x.valor !== alvo)) { l.valor = alvo; await LANC.salvar(l); }
+  }
+}
+function prevHtml(p, i) {
+  const sal = p.tipo === 'receita';
+  const fonte = !sal ? 'valor cadastrado' : p.ajustado ? 'ajustado por você' : p.fonte === 'aprendido' ? `média dos últimos ${p.n}` : 'valor cadastrado';
+  const nota = p.passado ? 'esperado e não lançado' : `previsto · ${fonte}${sal && p.min < p.valor ? ' · planeja com ' + brl(p.min) : ''}`;
+  const botao = sal ? (p.passado ? `<button class="pagar" data-p="${i}">Confirmar</button>` : `<button class="pagar" data-aj="${i}">Ajustar</button>`) : `<button class="pagar" data-p="${i}">Lançar</button>`;
+  return `<div class="cv prev"><div class="l1"><span class="data">${dataCurta(p.data)}</span><span class="desc">${esc(p.desc)}</span><span class="val ${sal ? 'rec' : ''}">${sal ? '+ ' : '− '}${brl(p.valor)}</span></div><div class="sub">${nota}</div><div class="acoes">${botao}</div></div>`;
+}
+// Folha para corrigir a previsão de um pagamento: só este mês ou este e os próximos 12
+function abrirAjuste(x, cfg, lancs, depois) {
+  const r = cfg.recebimentos[x.ri], d = new Date(x.data + 'T00:00:00'), aut = previsaoDe(cfg, lancs, r, d, true);
+  const f = document.createElement('div'); f.className = 'folha';
+  f.innerHTML = `<div class="painel form"><h2>Ajustar previsão</h2><p class="intro">${esc(x.desc)} · ${dataCurta(x.data)}</p>
+    <label>Valor previsto</label><input id="pv" class="valorgrande" inputmode="numeric" data-c="${x.valor}">
+    <p class="pequeno">Automático hoje: ${brl(aut.med)} (${aut.fonte === 'aprendido' ? 'média dos últimos ' + aut.n : 'valor cadastrado'}). O app planeja com o valor que você definir aqui.</p>
+    <p class="erro" id="pe" role="alert"></p>
+    <button class="botao" id="p1">Só este mês</button><button class="botao sec" id="p2">Este e os próximos 12 meses</button>
+    ${x.ajustado ? '<button class="botao sec" id="p3">Voltar ao automático</button>' : ''}<button class="botao sec" id="pc">Cancelar</button></div>`;
+  document.body.appendChild(f);
+  const $ = id => f.querySelector('#' + id); ligarDinheiro($('pv'));
+  const fechar = () => f.remove();
+  $('pc').onclick = fechar; f.addEventListener('click', e => { if (e.target === f) fechar(); });
+  const chaves = n => Array.from({ length: n }, (_, k) => chaveReceb(r, dataDoMes(r, d.getFullYear(), d.getMonth() + k)));
+  const gravar = async (n, valor) => { chaves(n).forEach(k => { if (valor === null) delete PREV[k]; else PREV[k] = valor; }); await DB.gravar('previsoes', PREV); fechar(); depois(); };
+  const valor = () => +($('pv').dataset.c || 0);
+  $('p1').onclick = () => valor() > 0 ? gravar(1, valor()) : ($('pe').textContent = 'Informe um valor maior que zero.');
+  $('p2').onclick = () => valor() > 0 ? gravar(13, valor()) : ($('pe').textContent = 'Informe um valor maior que zero.');
+  if ($('p3')) $('p3').onclick = () => gravar(13, null);
+}
+
 /* ---------- Visão por mês ---------- */
+const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
 const semRascunho = e => { if (!e) return {}; const { rascunho, ...resto } = e; return resto; };
 
 // Tudo de um mês: o que foi lançado e o que era esperado (salários e recorrentes) mas não está lançado
@@ -440,11 +499,12 @@ function dadosDoMes(cfg, lancs, recs, ign, ym) {
   const [y, m] = ym.split('-').map(Number), ini = new Date(cfg.saldoEm), iniYM = ymDe(ini), hojeI = hojeISO();
   const doMes = lancs.filter(l => l.data.startsWith(ym)).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
   const previstos = [];
-  cfg.recebimentos.forEach(r => {
+  cfg.recebimentos.forEach((r, ri) => {
     if (!(ym > iniYM || (ym === iniYM && r.dia >= ini.getDate()))) return;
     const d = new Date(y, m - 1, Math.min(r.dia, new Date(y, m, 0).getDate())), iso = isoDe(d), key = `${r.quem}${r.dia}-${iso}`;
     if (doMes.some(l => l.recebKey === key) || ign.includes(key)) return;
-    previstos.push({ tipo: 'receita', data: iso, desc: 'Salário ' + cfg.nomes[r.quem], valor: r.medio, key, passado: iso <= hojeI });
+    const pv = previsaoDe(cfg, lancs, r, d);
+    previstos.push({ tipo: 'receita', data: iso, desc: 'Salário ' + cfg.nomes[r.quem], valor: pv.med, min: pv.min, fonte: pv.fonte, n: pv.n, ajustado: pv.fonte === 'ajustado', ri, key, passado: iso <= hojeI });
   });
   recs.forEach(r => {
     for (let k = 0; k < 2000; k++) {
@@ -472,7 +532,7 @@ function cvLigar(raiz, todos, refrescar) {
     el.addEventListener('click', e => { if (!e.target.closest('button')) el.classList.toggle('aberto'); });
     const l = todos.find(x => x.id === +el.dataset.id);
     el.querySelector('[data-a=ed]').onclick = () => abrirLancamento(l);
-    el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); refrescar(); };
+    el.querySelector('[data-a=alt]').onclick = async () => { if (!l.pago && l.auto) return abrirLancamento({ ...l, rascunho: true, pago: true }); l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); refrescar(); };
     el.querySelector('[data-a=del]').onclick = async () => { if (confirm('Excluir "' + l.desc + '"?')) { await LANC.apagar(l.id); refrescar(); } };
   });
 }
@@ -519,6 +579,7 @@ async function salvarConfig() {
   const eu = document.getElementById('nomeEu').value.trim();
   const esposa = document.getElementById('nomeEsposa').value.trim();
   if (!eu || !esposa) return erro('Preencha os dois nomes.');
+  const antigoCfg = await DB.ler('config');
   const recebimentos = [];
   for (const b of area.querySelectorAll('.bloco')) {
     const n = +b.dataset.i + 1;
@@ -528,7 +589,9 @@ async function salvarConfig() {
     if (!(dia >= 1 && dia <= 31)) return erro(`Recebimento ${n}: o dia deve ficar entre 1 e 31.`);
     if (minimo <= 0 || medio <= 0) return erro(`Recebimento ${n}: informe o valor mínimo e o médio.`);
     if (minimo > medio) return erro(`Recebimento ${n}: o mínimo não pode ser maior que o médio.`);
-    recebimentos.push({ quem: b.querySelector('.quem').value, dia, minimo, medio });
+    const q = b.querySelector('.quem').value, ant = antigoCfg && antigoCfg.recebimentos[+b.dataset.i];
+    const mudou = !ant || ant.quem !== q || ant.dia !== dia || ant.minimo !== minimo || ant.medio !== medio; // mudou o cadastro: recomeça a aprender
+    recebimentos.push({ quem: q, dia, minimo, medio, aprendeDesde: mudou ? hojeISO() : ant.aprendeDesde });
   }
   const margem = +(document.getElementById('margem').dataset.c || 0);
   const sRaw = document.getElementById('saldo').dataset.c;
@@ -547,6 +610,7 @@ const telas = {
     const cfg = await DB.ler('config');
     if (!cfg) return formConfig(null);
     if (cfg.saldo === undefined) return formConfig(cfg, null);
+    await reajustarAutomaticos();
     const lancs = await LANC.todos();
     const p = projetar(cfg, lancs), longo = projetarLongo(cfg, lancs, [], 30);
     const ub = await DB.ler('ultimoBackup'), semBackup = !ub || Date.now() - ub > 30 * 864e5;
@@ -563,7 +627,7 @@ const telas = {
 
     const confHtml = aConf.length ? `<div class="aviso-card"><b>Confirme o que chegou</b><p class="pequeno">Informe o valor real recebido para o saldo ficar certo.</p>${aConf.map((x, k) => `
       <div class="conf" data-i="${k}"><div class="confh">Dia ${x.d.getDate()} · ${esc(cfg.nomes[x.r.quem])}</div>
-        <input class="cval" inputmode="numeric" data-c="${x.r.medio}">
+        <input class="cval" inputmode="numeric" data-c="${previsaoDe(cfg, lancs, x.r, x.d).med}">
         <div class="duas"><button class="botao" data-a="ok">Confirmar</button><button class="botao sec" data-a="ig">Ignorar</button></div></div>`).join('')}</div>` : '';
     const ritmoHtml = ritmo ? `<p class="pequeno" style="margin-top:2px">Seu ritmo recente: <b>${brl(ritmo.porDia)}</b>/dia${p.livre >= 0 ? (ritmo.porDia > p.livre ? ', acima do que cabe.' : ', dentro do que cabe.') : '.'}</p>` : '';
     const atalhosHtml = `<div class="atalhos"><button class="atalho fixo" id="nd">− Despesa</button><button class="atalho fixo" id="nr">+ Receita</button>${atalhos.map((g, k) => `<button class="atalho ${g.tipo}" data-i="${k}"><span>${esc(g.desc)}</span><b>${g.tipo === 'receita' ? '+ ' : ''}${brl(g.valor)}</b></button>`).join('')}</div>`;
@@ -576,7 +640,7 @@ const telas = {
     const receb = Object.values(grupos).sort((a, b) => a.d - b.d).slice(0, 3).map(g => {
       const n = diasAte(g.d), quando = n === 0 ? 'hoje' : n === 1 ? 'amanhã' : `em ${n} dias`;
       const nomes = [...new Set(g.itens.map(r => cfg.nomes[r.quem]))].join(' + ');
-      return `<div><span>Dia ${g.d.getDate()} · ${quando}<br><small class="pequeno">${esc(nomes)}</small></span><span>${brl(g.itens.reduce((t, r) => t + r.minimo, 0))}</span></div>`;
+      return `<div><span>Dia ${g.d.getDate()} · ${quando}<br><small class="pequeno">${esc(nomes)}</small></span><span>${brl(g.itens.reduce((t, r) => t + previsaoDe(cfg, lancs, r, g.d).min, 0))}</span></div>`;
     }).join('');
 
     area.innerHTML = `
@@ -597,8 +661,9 @@ const telas = {
         <div class="tot"><span>${sobra >= 0 ? 'Sobra' : 'Falta'}</span><span class="${sobra >= 0 ? 'pos' : 'neg'}">${brl(Math.abs(sobra))}</span></div></div></details>
       ${sugs.length ? `<details class="det sugd" open><summary>Sugestões do Folga (${sugs.length})</summary><div class="corpo">${sugs.map((x, k) => `
         <div class="sugestao" data-i="${k}"><p>${esc(x.texto)}</p><div class="duas"><button class="botao" data-a="aceitar">Atualizar</button><button class="botao sec" data-a="dispensar">Dispensar</button></div></div>`).join('')}</div></details>` : ''}
-      <details class="det"><summary>Próximos recebimentos (valor mínimo)</summary><div class="corpo lista" style="margin-top:0">${receb}</div></details>
+      <details class="det"><summary>Próximos recebimentos (planejado)</summary><div class="corpo lista" style="margin-top:0">${receb}</div></details>
       <details class="det"><summary>Mais${semBackup ? ' <b class="tag">backup pendente</b>' : ''}</summary><div class="corpo">
+        <button class="linkrow" id="apr"><span>O que o Folga aprendeu</span><span>›</span></button>
         <button class="linkrow" id="fech"><span>Fechamento do mês</span><span>›</span></button>
         <button class="linkrow" id="lemb"><span>Lembretes no Calendário</span><span>›</span></button>
         <button class="linkrow" id="bkp"><span>Backup e restauração${semBackup ? '<b class="tag">fazer agora</b>' : ''}</span><span>›</span></button>
@@ -608,10 +673,11 @@ const telas = {
     area.querySelector('#nr').onclick = () => abrirLancamento(null, 'receita');
     area.querySelectorAll('.atalho[data-i]').forEach(b => b.onclick = () => registrarAtalho(atalhos[+b.dataset.i]));
     area.querySelectorAll('.mini').forEach(b => b.onclick = async () => {
-      const l = pend.find(x => x.id === +b.dataset.id); l.pago = true; l.pagoEm = Date.now();
+      const l = pend.find(x => x.id === +b.dataset.id); if (l.auto) return abrirLancamento({ ...l, rascunho: true, pago: true }); l.pago = true; l.pagoEm = Date.now();
       await LANC.salvar(l); mostrar('hoje');
     });
     const todas = area.querySelector('#todas'); if (todas) todas.onclick = () => { filtro = 'pendentes'; mostrar('contas'); };
+    area.querySelector('#apr').onclick = () => mostrar('aprendizado');
     area.querySelector('#fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
     area.querySelector('#bkp').onclick = () => mostrar('backup');
     area.querySelector('#lemb').onclick = () => mostrar('lembretes');
@@ -722,7 +788,7 @@ const telas = {
       ${ant.temDados ? `<p class="aviso" style="margin-top:22px">${dif >= 0 ? 'Seu saldo aumentou ' + brl(dif) : 'Seu saldo ficou ' + brl(-dif) + ' menor'} em relação ao mês anterior.</p>` : ''}
       <p class="pequeno" style="margin-top:14px">Gastos por categoria somam despesas pagas e pendentes do mês. Salários ainda não confirmados entram pelo valor médio.</p>`;
     area.innerHTML = `<h1>Fechamento do mês</h1>
-      <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${nomeMes}</span><button id="prox" aria-label="Próximo mês" ${ym >= atualYM ? 'disabled' : ''}>›</button></div>
+      <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${cap(nomeMes)}</span><button id="prox" aria-label="Próximo mês" ${ym >= atualYM ? 'disabled' : ''}>›</button></div>
       ${corpo}<button class="botao sec" id="voltar" style="margin-top:24px">Voltar</button>`;
     area.querySelector('#ant').onclick = () => { mesFech = ymDe(new Date(y, m - 2, 1)); mostrar('fechamento'); };
     area.querySelector('#prox').onclick = () => { mesFech = ymDe(new Date(y, m, 1)); mostrar('fechamento'); };
@@ -740,14 +806,13 @@ const telas = {
     const tipoAba = abaMes === 'despesas' ? 'despesa' : 'receita';
     const prevAba = d.previstos.filter(x => x.tipo === tipoAba);
     const itens = (tipoAba === 'despesa' ? d.desp : d.rec).map(l => ({ l, data: l.data })).concat(prevAba.map(x => ({ p: x, data: x.data }))).sort((a, b) => a.data.localeCompare(b.data));
-    const linhas = itens.map(it => it.l ? cvHtml(it.l) : `<div class="cv prev"><div class="l1"><span class="data">${dataCurta(it.p.data)}</span><span class="desc">${esc(it.p.desc)}</span><span class="val ${it.p.tipo === 'receita' ? 'rec' : ''}">${it.p.tipo === 'receita' ? '+ ' : '− '}${brl(it.p.valor)}</span></div>
-      <div class="sub">${it.p.passado ? 'esperado e não lançado' : 'previsto'}${it.p.tipo === 'receita' ? ' · valor médio' : ''}</div>${it.p.passado ? `<div class="acoes"><button class="pagar" data-p="${d.previstos.indexOf(it.p)}">Lançar</button></div>` : ''}</div>`).join('');
+    const linhas = itens.map(it => it.l ? cvHtml(it.l) : prevHtml(it.p, d.previstos.indexOf(it.p))).join('');
     const faltando = d.previstos.filter(x => x.passado).length;
     const alerta = ym > atualYM ? '' : faltando
       ? `<p class="aviso" style="border-color:var(--ambar)"><b>Confira:</b> ${faltando} ${faltando === 1 ? 'item esperado não foi lançado' : 'itens esperados não foram lançados'} neste mês. Procure as linhas tracejadas e toque em Lançar.</p>`
       : '<p class="aviso">Nada esquecido: os salários e as contas recorrentes esperados já estão lançados.</p>';
     area.innerHTML = `<h1>Meses</h1>
-      <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${nomeMes}</span><button id="prox" aria-label="Próximo mês" ${ym >= maxYM ? 'disabled' : ''}>›</button></div>
+      <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${cap(nomeMes)}</span><button id="prox" aria-label="Próximo mês" ${ym >= maxYM ? 'disabled' : ''}>›</button></div>
       ${ym !== atualYM ? '<button class="linkrow" id="atual" style="padding:8px 0"><span>Ir para o mês atual</span><span>›</span></button>' : ''}
       <div class="extrato resumo-mes">
         <div><span>Receitas<small>recebido ${brl(d.recebido)} · a receber ${brl(d.aReceber)}</small></span><span class="pos">${brl(d.recebido + d.aReceber)}</span></div>
@@ -763,12 +828,38 @@ const telas = {
     const atual = area.querySelector('#atual'); if (atual) atual.onclick = () => ir(null);
     area.querySelectorAll('#sMes button').forEach(b => b.onclick = () => { abaMes = b.dataset.v; mostrar('meses'); });
     cvLigar(area, lancs, async () => { const topo = area.scrollTop; await mostrar('meses'); area.scrollTop = topo; });
+    const volta = async () => { const topo = area.scrollTop; await mostrar('meses'); area.scrollTop = topo; };
+    area.querySelectorAll('[data-aj]').forEach(b => b.onclick = () => abrirAjuste(d.previstos[+b.dataset.aj], cfg, lancs, volta));
     area.querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
       const x = d.previstos[+b.dataset.p];
       abrirLancamento(x.tipo === 'receita'
         ? { rascunho: true, tipo: 'receita', desc: x.desc, valor: x.valor, data: x.data, pago: true, categoria: null, recebKey: x.key }
         : { rascunho: true, tipo: 'despesa', desc: x.desc, valor: x.valor, data: x.data, pago: false, categoria: x.categoria || 'Contas', recorrenteId: x.recorrenteId });
     });
+  },
+  async aprendizado() {
+    const cfg = await DB.ler('config'), lancs = await LANC.todos(), recs = (await DB.ler('recorrentes')) || [], hojeI = hojeISO();
+    const sal = cfg.recebimentos.map(r => {
+      const a = previsaoDe(cfg, lancs, r, null);
+      return `<div class="ap"><b>${esc(cfg.nomes[r.quem])} · dia ${r.dia}</b><p class="pequeno">${a.fonte === 'aprendido'
+        ? `Aprendido com ${a.n} confirmações: mínimo ${brl(a.min)}, médio ${brl(a.med)}. Cadastro: ${brl(r.minimo)} / ${brl(r.medio)}.`
+        : `Usando o cadastro: mínimo ${brl(r.minimo)}, médio ${brl(r.medio)}. Começa a aprender com 2 confirmações (${a.n} até agora).`}</p></div>`;
+    }).join('');
+    const contas = recs.map(r => {
+      const n = lancs.filter(l => l.recorrenteId === r.id && l.pago && (!r.aprendeDesde || l.data >= r.aprendeDesde)).length, v = valorAprendido(r, lancs);
+      return `<div class="ap"><b>${esc(r.desc)}</b><p class="pequeno">${n >= 2 ? `Aprendido: ${brl(v)} (média das últimas ${Math.min(n, 3)} pagas). Cadastro: ${brl(r.valor)}.` : `Usando o cadastro: ${brl(r.valor)}. Começa a aprender com 2 pagamentos (${n} até agora).`}</p></div>`;
+    }).join('');
+    const ajustes = Object.keys(PREV).filter(k => k.slice(k.indexOf('-') + 1) >= hojeI).length;
+    area.innerHTML = `<div class="form"><h2>O que o Folga aprendeu</h2>
+      <p class="intro">Quando você confirma um salário ou paga uma conta recorrente com o valor real, o Folga ajusta as previsões dos próximos meses. Um ajuste seu, na aba Meses, sempre vale mais que o aprendido.</p>
+      <div class="sec-t">Salários</div>${sal}
+      <div class="sec-t">Contas recorrentes</div>${contas || '<p class="pequeno">Nenhuma cadastrada.</p>'}
+      <div class="sec-t">Ajustes manuais</div><p class="pequeno">${ajustes ? ajustes + ' previsões ajustadas por você nos próximos meses.' : 'Nenhum ajuste manual ativo.'}</p>
+      ${ajustes ? '<button class="botao sec" id="limpar">Limpar ajustes manuais</button>' : ''}
+      <button class="botao sec" id="voltar" style="margin-top:24px">Voltar</button></div>`;
+    area.querySelector('#voltar').onclick = () => mostrar('hoje');
+    const lp = area.querySelector('#limpar');
+    if (lp) lp.onclick = async () => { if (confirm('Remover todos os ajustes manuais de previsão?')) { PREV = {}; await DB.gravar('previsoes', PREV); mostrar('aprendizado'); } };
   },
   async comprar() {
     const cfg = await DB.ler('config');
@@ -838,7 +929,7 @@ const telas = {
     const MES = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }); };
     let mesAtual = '';
     const itens = vis.slice(0, limiteContas).map(l => {
-      const cab = l.data.slice(0, 7) !== mesAtual ? `<div class="sec-t" style="margin-top:22px;text-transform:capitalize">${MES(mesAtual = l.data.slice(0, 7))}</div>` : '';
+      const cab = l.data.slice(0, 7) !== mesAtual ? `<div class="sec-t" style="margin-top:22px">${MES(mesAtual = l.data.slice(0, 7))}</div>` : '';
       const sub = [l.categoria, l.pago ? '' : (l.data < hojeISO() ? 'atrasada' : 'pendente')].filter(Boolean).map(esc).join(' · ');
       return cab + `<div class="cv ${l.pago ? 'paga' : ''}" data-id="${l.id}"><div class="l1"><span class="data">${dataCurta(l.data)}</span><span class="desc">${esc(l.desc)}</span><span class="val ${l.tipo === 'receita' ? 'rec' : ''}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</span></div>${sub ? `<div class="sub">${sub}</div>` : ''}
         <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div>`;
@@ -856,7 +947,7 @@ const telas = {
       el.addEventListener('click', e => { if (!e.target.closest('button')) el.classList.toggle('aberto'); });
       const l = todos.find(x => x.id === +el.dataset.id);
       el.querySelector('[data-a=ed]').onclick = () => abrirLancamento(l);
-      el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); mostrar('contas'); };
+      el.querySelector('[data-a=alt]').onclick = async () => { if (!l.pago && l.auto) return abrirLancamento({ ...l, rascunho: true, pago: true }); l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); mostrar('contas'); };
       el.querySelector('[data-a=del]').onclick = async () => { if (confirm('Excluir "' + l.desc + '"?')) { await LANC.apagar(l.id); mostrar('contas'); } };
     });
   }
@@ -874,7 +965,7 @@ async function abrirLancamento(edit, tipoInicial) {
   let tipo = edit ? edit.tipo : (tipoInicial || 'despesa'), pago = edit ? edit.pago : true;
   const f = document.createElement('div'); f.className = 'folha';
   f.innerHTML = `<div class="painel form">
-    ${edit ? '<h2>' + (edit.rascunho ? 'Lançar' : 'Editar lançamento') + '</h2>' : ''}
+    ${edit ? '<h2>' + (edit.rascunho ? (edit.id ? 'Confirmar pagamento' : 'Lançar') : 'Editar lançamento') + '</h2>' : ''}
     <div class="seg" id="sTipo"><button data-v="despesa">Despesa</button><button data-v="receita">Receita</button></div>
     <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" ${edit ? `data-c="${edit.valor}"` : ''}>
     <div id="ldica" style="display:flex;gap:8px;margin-top:8px"></div>
@@ -917,7 +1008,7 @@ async function abrirLancamento(edit, tipoInicial) {
     const cat = tipo === 'despesa' ? f.querySelector('#lcat').value : null;
     if (cat) await DB.gravar('ultimaCategoria', cat);
     // Ao editar, mantém o vínculo com a recorrente/parcelas e só marca "pago agora" se passou de pendente para pago.
-    await LANC.salvar({ ...semRascunho(edit), tipo, desc, valor, data, pago, categoria: cat, pagoEm: pago ? (edit && edit.pago && !edit.rascunho ? (edit.pagoEm ?? null) : Date.now()) : null });
+    await LANC.salvar({ ...semRascunho(edit), auto: edit && edit.auto && valor === edit.valor ? true : undefined, tipo, desc, valor, data, pago, categoria: cat, pagoEm: pago ? (edit && edit.pago && !edit.rascunho ? (edit.pagoEm ?? null) : Date.now()) : null });
     fechar(); mostrar(document.querySelector('nav .ativa').dataset.tela);
   };
 }
@@ -925,7 +1016,7 @@ const fab = document.createElement('button'); fab.className = 'fab'; fab.textCon
 fab.onclick = () => abrirLancamento(); document.body.appendChild(fab);
 
 async function mostrar(nome) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : ['backup', 'fechamento', 'lembretes'].includes(nome) ? 'hoje' : nome)));
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : ['backup', 'fechamento', 'lembretes', 'aprendizado'].includes(nome) ? 'hoje' : nome)));
   await telas[nome]();
   area.scrollTop = 0;
 }
@@ -936,7 +1027,7 @@ async function mostrar(nome) {
   nav.querySelector('[data-tela=comprar]').textContent = 'Comprar?'; // cabe melhor com 4 abas
 })();
 document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => mostrar(b.dataset.tela)));
-gerarRecorrentes().catch(() => {}).then(() => mostrar('hoje'));
+DB.ler('previsoes').then(v => { PREV = v || {}; }).catch(() => {}).then(() => gerarRecorrentes()).catch(() => {}).then(() => reajustarAutomaticos()).catch(() => {}).then(() => mostrar('hoje'));
 
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); // pede ao iOS para não apagar os dados
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');

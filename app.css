@@ -182,3 +182,7 @@ nav { position: static; flex: none; }
 .cv.prev .sub { color: var(--ambar); }
 .resumo-mes { margin-top: 0; }
 .resumo-mes small { display: block; font-size: 12px; color: var(--suave); font-weight: 400; }
+/* Etapa 15 */
+.mesnav span { text-transform: none; }
+.ap { padding: 12px 0; border-bottom: 1px solid var(--linha); }
+.ap p { margin-top: 2px; }
