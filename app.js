@@ -349,6 +349,60 @@ function gerarICS(cfg, lancs) {
   return { texto: linhas.join('\r\n'), nC, nR };
 }
 
+/* ---------- Aprendizado ---------- */
+const media = a => a.reduce((t, v) => t + v, 0) / a.length;
+const emReais = c => Math.round(c / 100) * 100;
+
+// Sugere ajustar salários (a partir das confirmações) e contas recorrentes (a partir do que foi pago)
+function sugestoesAjuste(cfg, lancs, recs, dispensadas) {
+  const sug = [];
+  cfg.recebimentos.forEach((r, i) => {
+    const id = r.quem + r.dia;
+    const reais = lancs.filter(l => l.recebKey && l.recebKey.split('-')[0] === id).sort((a, b) => b.data.localeCompare(a.data)).slice(0, 6).map(l => l.valor);
+    if (reais.length < 3) return; // precisa de histórico mínimo
+    const min = Math.min(...reais), med = Math.max(emReais(media(reais)), min), key = `rec:${id}:${min}:${med}`;
+    if ((Math.abs(med - r.medio) / r.medio > 0.05 || Math.abs(min - r.minimo) / r.minimo > 0.05) && !dispensadas.includes(key))
+      sug.push({ key, tipo: 'rec', i, min, med, texto: `${cfg.nomes[r.quem]}, dia ${r.dia}: nos últimos ${reais.length} pagamentos o menor valor foi ${brl(min)} e a média ${brl(med)}. Hoje está cadastrado ${brl(r.minimo)} (mínimo) e ${brl(r.medio)} (médio).` });
+  });
+  recs.forEach(r => {
+    const pagas = lancs.filter(l => l.recorrenteId === r.id && l.pago).sort((a, b) => b.data.localeCompare(a.data)).slice(0, 3).map(l => l.valor);
+    if (pagas.length < 2) return;
+    const valor = emReais(media(pagas)), key = `conta:${r.id}:${valor}`;
+    if (Math.abs(valor - r.valor) / r.valor > 0.1 && !dispensadas.includes(key))
+      sug.push({ key, tipo: 'conta', id: r.id, valor, texto: `${r.desc}: a média das últimas ${pagas.length} contas pagas é ${brl(valor)}, e está cadastrada em ${brl(r.valor)}.` });
+  });
+  return sug;
+}
+
+// Quanto você costuma gastar por dia fora das contas fixas (últimos 30 dias)
+function ritmoDeGasto(lancs) {
+  const h = new Date(), h0 = new Date(h.getFullYear(), h.getMonth(), h.getDate());
+  const limite = isoDe(new Date(h0.getFullYear(), h0.getMonth(), h0.getDate() - 30)), hojeI = isoDe(h0);
+  const v = lancs.filter(l => l.tipo === 'despesa' && l.pago && !l.recorrenteId && !l.grupo && l.data >= limite && l.data <= hojeI);
+  if (v.length < 5) return null;
+  const dias = Math.min(30, 1 - diasAte(new Date(v.map(l => l.data).sort()[0] + 'T00:00:00')));
+  if (dias < 7) return null;
+  return { porDia: Math.round(v.reduce((t, l) => t + l.valor, 0) / dias), dias };
+}
+
+// "Posso comprar?": quando ou em quantas vezes a compra passa a caber
+function extrasCompra(total, n, base) {
+  if (n === 1) return [{ i: 0, valor: total }];
+  const p0 = Math.floor(total / n);
+  return Array.from({ length: n }, (_, k) => ({ i: Math.max(0, diasAte(somaMes(base, k))), valor: p0 + (k === 0 ? total - p0 * n : 0) }));
+}
+function primeiroDiaQueCabe(cfg, lancs, total, horizonte = 60) {
+  for (let i0 = 1; i0 <= horizonte; i0++) {
+    const c = projetarLongo(cfg, lancs, [{ i: i0, valor: total }]).curva;
+    if (Math.min(...c.slice(i0)) >= cfg.margem) return i0; // só importa do dia da compra em diante
+  }
+  return null;
+}
+function menorParcelamento(cfg, lancs, total, base, de = 2) {
+  for (let n = de; n <= 12; n++) if (Math.min(...projetarLongo(cfg, lancs, extrasCompra(total, n, base)).curva) >= cfg.margem) return n;
+  return null;
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -423,6 +477,11 @@ const telas = {
     const p = projetar(cfg, lancs), longo = projetarLongo(cfg, lancs, [], 30);
     const ub = await DB.ler('ultimoBackup'), semBackup = !ub || Date.now() - ub > 30 * 864e5;
     const ign = (await DB.ler('recebIgnorados')) || [], aConf = recebimentosAConfirmar(cfg, lancs, ign);
+    const recs = (await DB.ler('recorrentes')) || [], disp = (await DB.ler('sugDispensadas')) || [];
+    const sugs = sugestoesAjuste(cfg, lancs, recs, disp), ritmo = ritmoDeGasto(lancs);
+    const sugHtml = sugs.length ? `<div class="sec-t">Sugestões do Folga</div>${sugs.map((x, i) => `
+      <div class="sugestao" data-i="${i}"><p>${esc(x.texto)}</p><div class="duas"><button class="botao" data-a="aceitar">Atualizar</button><button class="botao sec" data-a="dispensar">Dispensar</button></div></div>`).join('')}` : '';
+    const ritmoHtml = ritmo ? `<p class="pequeno" style="margin-top:6px">Seu ritmo recente de gastos: <b>${brl(ritmo.porDia)}</b> por dia (últimos ${ritmo.dias} dias)${p.livre >= 0 ? (ritmo.porDia > p.livre ? ', acima do que cabe.' : ', dentro do que cabe.') : '.'}</p>` : '';
     const confHtml = aConf.length ? `<div class="aviso-card"><b>Confirme o que chegou</b><p class="pequeno">Informe o valor real recebido para o saldo ficar certo.</p>${aConf.map((x, i) => `
       <div class="conf" data-i="${i}"><div class="confh">Dia ${x.d.getDate()} · ${esc(cfg.nomes[x.r.quem])}</div>
         <input class="cval" inputmode="numeric" data-c="${x.r.medio}">
@@ -454,6 +513,7 @@ const telas = {
       <span class="chip ${cls}">${rotulo}</span>
       <p class="contexto" style="margin-top:8px">${sobra < 0 ? `Evite novos gastos até o dia ${fim}.` : p.dias > 1 ? `Por dia, até o dia ${fim} (${p.dias} dias).` : `Até o dia ${fim}, quando chegam os recebimentos.`}</p>
 
+      ${ritmoHtml}
       <div class="sec-t">Como chegamos nesse número</div>
       <div class="extrato">
         <div><span>Saldo hoje</span><span>${brl(p.saldoAtual)}</span></div>
@@ -466,6 +526,7 @@ const telas = {
       ${curvaHoje(longo.curva, cfg.margem, marcosRecebimento(cfg, 30), longo.iMin)}
       <p class="contexto" style="font-size:15px">${apertoTxt}</p>
 
+      ${sugHtml}
       <div class="sec-t">Vence em breve</div>
       ${venc || '<p class="contexto">Nenhuma conta pendente.</p>'}
       ${pend.length > 5 ? `<button class="linkrow" id="todas"><span>Ver todas as pendentes (${pend.length})</span><span>›</span></button>` : ''}
@@ -487,6 +548,18 @@ const telas = {
     area.querySelector('#fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
     area.querySelector('#bkp').onclick = () => mostrar('backup');
     area.querySelector('#lemb').onclick = () => mostrar('lembretes');
+    area.querySelectorAll('.sugestao').forEach(el => {
+      const x = sugs[+el.dataset.i];
+      el.querySelector('[data-a=dispensar]').onclick = async () => { await DB.gravar('sugDispensadas', [...disp, x.key]); mostrar('hoje'); };
+      el.querySelector('[data-a=aceitar]').onclick = async () => {
+        if (x.tipo === 'rec') { cfg.recebimentos[x.i].minimo = x.min; cfg.recebimentos[x.i].medio = x.med; await DB.gravar('config', cfg); }
+        else {
+          const lista = (await DB.ler('recorrentes')) || [], r = lista.find(y => y.id === x.id); r.valor = x.valor; await DB.gravar('recorrentes', lista);
+          for (const y of lancs.filter(z => z.recorrenteId === x.id && !z.pago && z.data >= hojeI)) { y.valor = x.valor; await LANC.salvar(y); }
+        }
+        mostrar('hoje');
+      };
+    });
     area.querySelectorAll('.conf').forEach(el => {
       const x = aConf[+el.dataset.i], campo = el.querySelector('.cval'); ligarDinheiro(campo);
       el.querySelector('[data-a=ok]').onclick = async () => {
@@ -622,7 +695,15 @@ const telas = {
       if (com.min < 0) { cls = 'v-ruim'; titulo = 'Não cabe'; motivo = `No dia ${diaDoIndice(com.iMin)} o saldo fica negativo (${brl(com.min)}).`; }
       else if (com.min < cfg.margem) { cls = 'v-medio'; titulo = 'Cabe, mas aperta'; motivo = `No dia ${diaDoIndice(com.iMin)} o saldo cai para ${brl(com.min)}, abaixo da sua margem de ${brl(cfg.margem)}.${sem.min < cfg.margem ? ' Esse período já estava apertado antes da compra.' : ''}`; }
       else { cls = 'v-ok'; titulo = 'Cabe'; motivo = `O saldo não passa da sua margem nos próximos 90 dias. O ponto mais baixo é ${brl(com.min)}, no dia ${diaDoIndice(com.iMin)}.`; }
-      $('res').innerHTML = `<div class="veredito ${cls}">${titulo}</div><p class="contexto" style="margin-bottom:12px">${motivo}</p>
+      let sugHtml = '';
+      if (cls !== 'v-ok') {
+        const sg = [], b1 = base || somaMes(new Date(), 1);
+        if (n === 1) { const d0 = primeiroDiaQueCabe(cfg, lancs, total); if (d0) sg.push(`Esperar até ${diaDoIndice(d0)}: à vista, a compra passa a caber.`); }
+        const nm = menorParcelamento(cfg, lancs, total, b1, n + 1);
+        if (nm) sg.push(`Parcelar em ${nm}x, com a 1ª parcela em ${dataCurta(isoDe(b1))}: cabe.`);
+        if (sg.length) sugHtml = `<p class="aviso" style="margin:12px 0"><b>Sugestão</b><br>${sg.join('<br>')}</p>`;
+      }
+      $('res').innerHTML = `<div class="veredito ${cls}">${titulo}</div><p class="contexto" style="margin-bottom:12px">${motivo}</p>${sugHtml}
         ${curvaDupla(sem.curva, com.curva, cfg.margem)}
         <p class="pequeno">Tracejado: sem a compra · Linha cheia: com a compra.</p>
         <p class="contexto" style="margin-top:14px">Livre por dia até o próximo recebimento: <b>${brl(Math.max(l0, 0))}</b> → <b>${brl(Math.max(l1, 0))}</b></p>
@@ -668,7 +749,12 @@ const telas = {
 
 async function abrirLancamento(edit) {
   if (!(edit && typeof edit.id === 'number')) edit = null; // só edita se receber um lançamento de verdade (não um toque)
-  const sug = [...new Set((await LANC.todos()).map(l => l.desc))];
+  const todos = await LANC.todos(), sug = [...new Set(todos.map(l => l.desc))];
+  const hist = {}; // o que o app já aprendeu sobre cada descrição
+  todos.filter(l => l.tipo === 'despesa' && l.categoria).sort((a, b) => a.data.localeCompare(b.data)).forEach(l => {
+    const h = hist[l.desc.trim().toLowerCase()] = hist[l.desc.trim().toLowerCase()] || { cats: {}, valores: [] };
+    h.cats[l.categoria] = (h.cats[l.categoria] || 0) + 1; h.valores.push(l.valor);
+  });
   const ultima = await DB.ler('ultimaCategoria');
   let tipo = edit ? edit.tipo : 'despesa', pago = edit ? edit.pago : true;
   const f = document.createElement('div'); f.className = 'folha';
@@ -676,6 +762,7 @@ async function abrirLancamento(edit) {
     ${edit ? '<h2>Editar lançamento</h2>' : ''}
     <div class="seg" id="sTipo"><button data-v="despesa">Despesa</button><button data-v="receita">Receita</button></div>
     <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" ${edit ? `data-c="${edit.valor}"` : ''}>
+    <div id="ldica" style="display:flex;gap:8px;margin-top:8px"></div>
     <label>Descrição</label><input id="ld" list="sug" autocomplete="off" placeholder="Ex.: Mercado" value="${edit ? esc(edit.desc) : ''}"><datalist id="sug">${sug.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
     <div id="lcatw"><label>Categoria</label><select id="lcat">${opcoesCat(edit ? (edit.categoria || 'Outros') : (ultima || 'Outros'))}</select></div>
     <label>Data</label><input id="ldt" type="date" value="${edit ? edit.data : hojeISO()}">
@@ -693,6 +780,17 @@ async function abrirLancamento(edit) {
   f.querySelectorAll('#sTipo button').forEach(b => b.onclick = () => { tipo = b.dataset.v; pintar(); });
   f.querySelectorAll('#sPago button').forEach(b => b.onclick = () => { pago = b.dataset.v === '1'; pintar(); });
   pintar(); ligarDinheiro($('lv')); $('lv').focus();
+  const sugerir = () => {
+    const dica = $('ldica'), h = hist[$('ld').value.trim().toLowerCase()];
+    dica.innerHTML = '';
+    if (edit || tipo !== 'despesa' || !h) return;
+    $('lcat').value = Object.entries(h.cats).sort((a, b) => b[1] - a[1])[0][0]; // categoria mais usada nessa descrição
+    if (+($('lv').dataset.c || 0)) return;
+    const ult = h.valores[h.valores.length - 1], med = emReais(media(h.valores.slice(-5)));
+    dica.innerHTML = `<button class="mini" data-v="${ult}">Último: ${brl(ult)}</button>` + (med !== ult ? `<button class="mini" data-v="${med}">Média: ${brl(med)}</button>` : '');
+    dica.querySelectorAll('button').forEach(b => b.onclick = () => { $('lv').dataset.c = b.dataset.v; $('lv').value = brl(+b.dataset.v); dica.innerHTML = ''; });
+  };
+  $('ld').addEventListener('input', sugerir); $('ld').addEventListener('change', sugerir);
   const fechar = () => f.remove();
   $('lc').onclick = fechar;
   f.addEventListener('click', e => { if (e.target === f) fechar(); });

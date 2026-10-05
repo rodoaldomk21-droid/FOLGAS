@@ -138,3 +138,6 @@ nav { position: static; flex: none; }
 .aviso-card { background: var(--papel); border: 1px solid var(--destaque); border-radius: 14px; padding: 16px; margin: 14px 0 6px; }
 .conf { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--linha); }
 .confh { font-weight: 600; margin-bottom: 8px; }
+/* Etapa 12: sugestões */
+.sugestao { background: var(--papel); border-left: 3px solid var(--ambar); border-radius: 0 12px 12px 0; padding: 14px 16px; margin-top: 12px; }
+.sugestao p { margin-bottom: 2px; }
