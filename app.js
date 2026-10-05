@@ -525,6 +525,7 @@ const telas = {
 };
 
 async function abrirLancamento(edit) {
+  if (!(edit && typeof edit.id === 'number')) edit = null; // só edita se receber um lançamento de verdade (não um toque)
   const sug = [...new Set((await LANC.todos()).map(l => l.desc))];
   const ultima = await DB.ler('ultimaCategoria');
   let tipo = edit ? edit.tipo : 'despesa', pago = edit ? edit.pago : true;
@@ -566,7 +567,7 @@ async function abrirLancamento(edit) {
   };
 }
 const fab = document.createElement('button'); fab.className = 'fab'; fab.textContent = '+'; fab.setAttribute('aria-label', 'Novo lançamento');
-fab.onclick = abrirLancamento; document.body.appendChild(fab);
+fab.onclick = () => abrirLancamento(); document.body.appendChild(fab);
 
 async function mostrar(nome) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : (nome === 'backup' || nome === 'fechamento') ? 'hoje' : nome)));

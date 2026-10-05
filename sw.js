@@ -1,6 +1,6 @@
 // Estratégia: tenta a internet primeiro (sempre pega a versão nova) e usa o cache só se estiver offline.
 // Ao alterar qualquer arquivo do app, mude o número da versão abaixo.
-const VERSAO = 'folga-v12';
+const VERSAO = 'folga-v13';
 const ARQUIVOS = ['./', 'index.html', 'manifest.json', 'app.css', 'app.js', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
