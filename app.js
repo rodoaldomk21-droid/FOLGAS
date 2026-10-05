@@ -160,12 +160,13 @@ function proximaOcorrencia(r) { for (let k = 0; k < 2000; k++) { const d = ocorr
 async function gerarRecorrentes() {
   const lista = (await DB.ler('recorrentes')) || [];
   let mudou = false;
+  const existentes = await LANC.todos();
   for (const r of lista) {
     for (let k = 0; k < 2000; k++) {
       const d = ocorrencia(r, k), i = diasAte(d);
       if (i > 120) break;
       const iso = isoDe(d);
-      if (i < 0 || r.gerados.includes(iso)) continue;
+      if (i < 0 || r.gerados.includes(iso) || existentes.some(l => l.recorrenteId === r.id && l.data === iso)) continue;
       await LANC.salvar({ tipo: 'despesa', desc: r.desc, valor: r.valor, data: iso, pago: false, pagoEm: null, recorrenteId: r.id, categoria: r.categoria || 'Contas' });
       r.gerados.push(iso); mudou = true;
     }
@@ -431,6 +432,51 @@ async function registrarAtalho(g) {
     ['Editar', () => abrirLancamento(l)]]);
 }
 
+/* ---------- Visão por mês ---------- */
+const semRascunho = e => { if (!e) return {}; const { rascunho, ...resto } = e; return resto; };
+
+// Tudo de um mês: o que foi lançado e o que era esperado (salários e recorrentes) mas não está lançado
+function dadosDoMes(cfg, lancs, recs, ign, ym) {
+  const [y, m] = ym.split('-').map(Number), ini = new Date(cfg.saldoEm), iniYM = ymDe(ini), hojeI = hojeISO();
+  const doMes = lancs.filter(l => l.data.startsWith(ym)).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
+  const previstos = [];
+  cfg.recebimentos.forEach(r => {
+    if (!(ym > iniYM || (ym === iniYM && r.dia >= ini.getDate()))) return;
+    const d = new Date(y, m - 1, Math.min(r.dia, new Date(y, m, 0).getDate())), iso = isoDe(d), key = `${r.quem}${r.dia}-${iso}`;
+    if (doMes.some(l => l.recebKey === key) || ign.includes(key)) return;
+    previstos.push({ tipo: 'receita', data: iso, desc: 'Salário ' + cfg.nomes[r.quem], valor: r.medio, key, passado: iso <= hojeI });
+  });
+  recs.forEach(r => {
+    for (let k = 0; k < 2000; k++) {
+      const d = ocorrencia(r, k), dym = ymDe(d), iso = isoDe(d);
+      if (dym > ym) break;
+      if (dym === ym && !lancs.some(l => l.recorrenteId === r.id && l.data === iso) && !r.gerados.includes(iso))
+        previstos.push({ tipo: 'despesa', data: iso, desc: r.desc, valor: r.valor, categoria: r.categoria, recorrenteId: r.id, passado: iso <= hojeI });
+    }
+  });
+  const soma = a => a.reduce((t, x) => t + x.valor, 0);
+  const rec = doMes.filter(l => l.tipo === 'receita'), desp = doMes.filter(l => l.tipo === 'despesa');
+  const pr = previstos.filter(x => x.tipo === 'receita'), pd = previstos.filter(x => x.tipo === 'despesa');
+  const recebido = soma(rec.filter(l => l.pago)), aReceber = soma(rec.filter(l => !l.pago)) + soma(pr);
+  const pago = soma(desp.filter(l => l.pago)), aPagar = soma(desp.filter(l => !l.pago)) + soma(pd);
+  return { rec, desp, previstos, recebido, aReceber, pago, aPagar, resultado: recebido + aReceber - pago - aPagar };
+}
+
+function cvHtml(l) {
+  const sub = [l.categoria, l.pago ? '' : (l.data < hojeISO() ? 'atrasada' : 'pendente')].filter(Boolean).map(esc).join(' · ');
+  return `<div class="cv ${l.pago ? 'paga' : ''}" data-id="${l.id}"><div class="l1"><span class="data">${dataCurta(l.data)}</span><span class="desc">${esc(l.desc)}</span><span class="val ${l.tipo === 'receita' ? 'rec' : ''}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</span></div>${sub ? `<div class="sub">${sub}</div>` : ''}
+    <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div>`;
+}
+function cvLigar(raiz, todos, refrescar) {
+  raiz.querySelectorAll('.cv:not(.prev)').forEach(el => {
+    el.addEventListener('click', e => { if (!e.target.closest('button')) el.classList.toggle('aberto'); });
+    const l = todos.find(x => x.id === +el.dataset.id);
+    el.querySelector('[data-a=ed]').onclick = () => abrirLancamento(l);
+    el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); refrescar(); };
+    el.querySelector('[data-a=del]').onclick = async () => { if (confirm('Excluir "' + l.desc + '"?')) { await LANC.apagar(l.id); refrescar(); } };
+  });
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -495,7 +541,7 @@ async function salvarConfig() {
   mostrar('hoje');
 }
 
-let filtro = 'pendentes', mesFech = null, limiteContas = 15;
+let filtro = 'pendentes', mesFech = null, limiteContas = 15, mesVisto = null, abaMes = 'despesas';
 const telas = {
   async hoje() {
     const cfg = await DB.ler('config');
@@ -682,6 +728,48 @@ const telas = {
     area.querySelector('#prox').onclick = () => { mesFech = ymDe(new Date(y, m, 1)); mostrar('fechamento'); };
     area.querySelector('#voltar').onclick = () => { mesFech = null; mostrar('hoje'); };
   },
+  async meses() {
+    const cfg = await DB.ler('config');
+    if (!cfg || cfg.saldo === undefined) { area.innerHTML = '<div class="vazio"><h1>Meses</h1><p>Termine a configuração na aba Hoje primeiro.</p></div>'; return; }
+    const lancs = await LANC.todos(), recs = (await DB.ler('recorrentes')) || [], ign = (await DB.ler('recebIgnorados')) || [];
+    const agora = new Date(), atualYM = ymDe(agora), maxYM = ymDe(new Date(agora.getFullYear(), agora.getMonth() + 12, 1));
+    const minYM = [ymDe(new Date(cfg.saldoEm)), ...lancs.map(l => l.data.slice(0, 7))].sort()[0];
+    const ym = mesVisto || atualYM, [y, m] = ym.split('-').map(Number);
+    const d = dadosDoMes(cfg, lancs, recs, ign, ym);
+    const nomeMes = new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    const tipoAba = abaMes === 'despesas' ? 'despesa' : 'receita';
+    const prevAba = d.previstos.filter(x => x.tipo === tipoAba);
+    const itens = (tipoAba === 'despesa' ? d.desp : d.rec).map(l => ({ l, data: l.data })).concat(prevAba.map(x => ({ p: x, data: x.data }))).sort((a, b) => a.data.localeCompare(b.data));
+    const linhas = itens.map(it => it.l ? cvHtml(it.l) : `<div class="cv prev"><div class="l1"><span class="data">${dataCurta(it.p.data)}</span><span class="desc">${esc(it.p.desc)}</span><span class="val ${it.p.tipo === 'receita' ? 'rec' : ''}">${it.p.tipo === 'receita' ? '+ ' : '− '}${brl(it.p.valor)}</span></div>
+      <div class="sub">${it.p.passado ? 'esperado e não lançado' : 'previsto'}${it.p.tipo === 'receita' ? ' · valor médio' : ''}</div>${it.p.passado ? `<div class="acoes"><button class="pagar" data-p="${d.previstos.indexOf(it.p)}">Lançar</button></div>` : ''}</div>`).join('');
+    const faltando = d.previstos.filter(x => x.passado).length;
+    const alerta = ym > atualYM ? '' : faltando
+      ? `<p class="aviso" style="border-color:var(--ambar)"><b>Confira:</b> ${faltando} ${faltando === 1 ? 'item esperado não foi lançado' : 'itens esperados não foram lançados'} neste mês. Procure as linhas tracejadas e toque em Lançar.</p>`
+      : '<p class="aviso">Nada esquecido: os salários e as contas recorrentes esperados já estão lançados.</p>';
+    area.innerHTML = `<h1>Meses</h1>
+      <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${nomeMes}</span><button id="prox" aria-label="Próximo mês" ${ym >= maxYM ? 'disabled' : ''}>›</button></div>
+      ${ym !== atualYM ? '<button class="linkrow" id="atual" style="padding:8px 0"><span>Ir para o mês atual</span><span>›</span></button>' : ''}
+      <div class="extrato resumo-mes">
+        <div><span>Receitas<small>recebido ${brl(d.recebido)} · a receber ${brl(d.aReceber)}</small></span><span class="pos">${brl(d.recebido + d.aReceber)}</span></div>
+        <div><span>Despesas<small>pago ${brl(d.pago)} · a pagar ${brl(d.aPagar)}</small></span><span>${brl(d.pago + d.aPagar)}</span></div>
+        <div class="tot"><span>Resultado do mês<small>se tudo o previsto acontecer</small></span><span class="${d.resultado >= 0 ? 'pos' : 'neg'}">${brl(d.resultado)}</span></div>
+      </div>
+      ${alerta}
+      <div class="seg" id="sMes" style="margin:16px 0 4px"><button data-v="despesas" class="${abaMes === 'despesas' ? 'on' : ''}">Despesas (${d.desp.length + d.previstos.filter(x => x.tipo === 'despesa').length})</button><button data-v="receitas" class="${abaMes === 'receitas' ? 'on' : ''}">Receitas (${d.rec.length + d.previstos.filter(x => x.tipo === 'receita').length})</button></div>
+      ${linhas || '<p class="contexto" style="margin-top:18px">Nada neste mês.</p>'}`;
+    const ir = novo => { mesVisto = novo; mostrar('meses'); };
+    area.querySelector('#ant').onclick = () => ir(ymDe(new Date(y, m - 2, 1)));
+    area.querySelector('#prox').onclick = () => ir(ymDe(new Date(y, m, 1)));
+    const atual = area.querySelector('#atual'); if (atual) atual.onclick = () => ir(null);
+    area.querySelectorAll('#sMes button').forEach(b => b.onclick = () => { abaMes = b.dataset.v; mostrar('meses'); });
+    cvLigar(area, lancs, async () => { const topo = area.scrollTop; await mostrar('meses'); area.scrollTop = topo; });
+    area.querySelectorAll('[data-p]').forEach(b => b.onclick = () => {
+      const x = d.previstos[+b.dataset.p];
+      abrirLancamento(x.tipo === 'receita'
+        ? { rascunho: true, tipo: 'receita', desc: x.desc, valor: x.valor, data: x.data, pago: true, categoria: null, recebKey: x.key }
+        : { rascunho: true, tipo: 'despesa', desc: x.desc, valor: x.valor, data: x.data, pago: false, categoria: x.categoria || 'Contas', recorrenteId: x.recorrenteId });
+    });
+  },
   async comprar() {
     const cfg = await DB.ler('config');
     if (!cfg || cfg.saldo === undefined) { area.innerHTML = '<div class="vazio"><h1>Posso comprar?</h1><p>Termine a configuração na aba Hoje primeiro.</p></div>'; return; }
@@ -775,7 +863,7 @@ const telas = {
 };
 
 async function abrirLancamento(edit, tipoInicial) {
-  if (!(edit && typeof edit.id === 'number')) edit = null; // só edita se receber um lançamento de verdade (não um toque)
+  if (!(edit && (typeof edit.id === 'number' || edit.rascunho))) edit = null; // só edita se receber um lançamento de verdade (não um toque)
   const todos = await LANC.todos(), sug = [...new Set(todos.map(l => l.desc))];
   const hist = {}; // o que o app já aprendeu sobre cada descrição
   todos.filter(l => l.tipo === 'despesa' && l.categoria).sort((a, b) => a.data.localeCompare(b.data)).forEach(l => {
@@ -786,7 +874,7 @@ async function abrirLancamento(edit, tipoInicial) {
   let tipo = edit ? edit.tipo : (tipoInicial || 'despesa'), pago = edit ? edit.pago : true;
   const f = document.createElement('div'); f.className = 'folha';
   f.innerHTML = `<div class="painel form">
-    ${edit ? '<h2>Editar lançamento</h2>' : ''}
+    ${edit ? '<h2>' + (edit.rascunho ? 'Lançar' : 'Editar lançamento') + '</h2>' : ''}
     <div class="seg" id="sTipo"><button data-v="despesa">Despesa</button><button data-v="receita">Receita</button></div>
     <label>Valor</label><input id="lv" class="valorgrande" inputmode="numeric" placeholder="R$ 0,00" ${edit ? `data-c="${edit.valor}"` : ''}>
     <div id="ldica" style="display:flex;gap:8px;margin-top:8px"></div>
@@ -829,7 +917,7 @@ async function abrirLancamento(edit, tipoInicial) {
     const cat = tipo === 'despesa' ? f.querySelector('#lcat').value : null;
     if (cat) await DB.gravar('ultimaCategoria', cat);
     // Ao editar, mantém o vínculo com a recorrente/parcelas e só marca "pago agora" se passou de pendente para pago.
-    await LANC.salvar({ ...(edit || {}), tipo, desc, valor, data, pago, categoria: cat, pagoEm: pago ? (edit && edit.pago ? (edit.pagoEm ?? null) : Date.now()) : null });
+    await LANC.salvar({ ...semRascunho(edit), tipo, desc, valor, data, pago, categoria: cat, pagoEm: pago ? (edit && edit.pago && !edit.rascunho ? (edit.pagoEm ?? null) : Date.now()) : null });
     fechar(); mostrar(document.querySelector('nav .ativa').dataset.tela);
   };
 }
@@ -841,6 +929,12 @@ async function mostrar(nome) {
   await telas[nome]();
   area.scrollTop = 0;
 }
+(() => {
+  const nav = document.getElementById('abas'), b = document.createElement('button');
+  b.dataset.tela = 'meses'; b.textContent = 'Meses';
+  nav.insertBefore(b, nav.querySelector('[data-tela=contas]'));
+  nav.querySelector('[data-tela=comprar]').textContent = 'Comprar?'; // cabe melhor com 4 abas
+})();
 document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => mostrar(b.dataset.tela)));
 gerarRecorrentes().catch(() => {}).then(() => mostrar('hoje'));
 

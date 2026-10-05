@@ -176,3 +176,9 @@ nav { position: static; flex: none; }
 .cv.paga .desc { color: var(--suave); text-decoration: line-through; }
 .cv .acoes button { border: 1px solid var(--linha); background: none; color: var(--suave); border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600; font-size: 14px; }
 .cv .acoes button.pagar { color: var(--destaque); border-color: var(--destaque); }
+/* Etapa 14: aba Meses */
+.cv.prev { opacity: .85; border-left: 2px dashed var(--linha); padding-left: 10px; cursor: default; }
+.cv.prev .acoes { display: flex; }
+.cv.prev .sub { color: var(--ambar); }
+.resumo-mes { margin-top: 0; }
+.resumo-mes small { display: block; font-size: 12px; color: var(--suave); font-weight: 400; }
