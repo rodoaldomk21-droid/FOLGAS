@@ -220,13 +220,14 @@ function validarBackup(b) {
   if (!c.recebimentos.every(r => ['eu', 'esposa'].includes(r.quem) && int(r.dia) && r.dia >= 1 && r.dia <= 31 && int(r.minimo) && r.minimo > 0 && int(r.medio) && r.medio > 0)) return 'Os recebimentos do backup são inválidos.';
   if (!Array.isArray(b.lancamentos) || !b.lancamentos.every(l => ['despesa', 'receita'].includes(l.tipo) && typeof l.desc === 'string' && int(l.valor) && l.valor > 0 && dataOk(l.data) && typeof l.pago === 'boolean')) return 'Há lançamentos inválidos no backup.';
   if (!Array.isArray(b.recorrentes) || !b.recorrentes.every(r => int(r.id) && typeof r.desc === 'string' && int(r.valor) && r.valor > 0 && FREQ[r.freq] && dataOk(r.inicio) && Array.isArray(r.gerados))) return 'Há contas recorrentes inválidas no backup.';
+  if (b.recebIgnorados !== undefined && !(Array.isArray(b.recebIgnorados) && b.recebIgnorados.every(x => typeof x === 'string'))) return 'Os recebimentos ignorados do backup são inválidos.';
   return null;
 }
 
 async function exportarBackup(msg) {
   const cfg = await DB.ler('config');
   if (!cfg || cfg.saldo === undefined) return msg('Termine a configuração na aba Hoje antes de fazer backup.', true);
-  const dados = { app: 'folga', versao: 1, exportadoEm: new Date().toISOString(), config: cfg, recorrentes: (await DB.ler('recorrentes')) || [], lancamentos: await LANC.todos() };
+  const dados = { app: 'folga', versao: 1, exportadoEm: new Date().toISOString(), config: cfg, recorrentes: (await DB.ler('recorrentes')) || [], recebIgnorados: (await DB.ler('recebIgnorados')) || [], lancamentos: await LANC.todos() };
   const nome = `folga-backup-${hojeISO()}.json`;
   const arquivo = new File([JSON.stringify(dados, null, 1)], nome, { type: 'application/json' });
   try {
@@ -243,13 +244,13 @@ async function restaurarBackup(arquivo, msg) {
   const erro = validarBackup(b);
   if (erro) return msg(erro + ' Nada foi alterado.', true);
   if (!confirm(`Restaurar vai SUBSTITUIR todos os dados atuais por este backup (${b.lancamentos.length} lançamentos, feito em ${new Date(b.exportadoEm).toLocaleDateString('pt-BR')}). Continuar?`)) return msg('Restauração cancelada. Nada foi alterado.');
-  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'categoria', 'grupo', 'parcela', 'total'];
+  const campos = ['id', 'tipo', 'desc', 'valor', 'data', 'pago', 'pagoEm', 'recorrenteId', 'categoria', 'recebKey', 'grupo', 'parcela', 'total'];
   const limpos = b.lancamentos.map(l => Object.fromEntries(campos.filter(k => l[k] !== undefined).map(k => [k, l[k]])));
   const d = await DB.abrir();
   try {
     await new Promise((ok, falha) => { // tudo ou nada: se algo falhar, os dados atuais ficam intactos
       const t = d.transaction(['config', 'lancamentos'], 'readwrite'), c = t.objectStore('config'), l = t.objectStore('lancamentos');
-      l.clear(); c.put(b.config, 'config'); c.put(b.recorrentes, 'recorrentes'); limpos.forEach(x => l.put(x));
+      l.clear(); c.put(b.config, 'config'); c.put(b.recorrentes, 'recorrentes'); c.put(b.recebIgnorados || [], 'recebIgnorados'); limpos.forEach(x => l.put(x));
       t.oncomplete = ok; t.onerror = t.onabort = () => falha(t.error);
     });
   } catch { return msg('Falha ao restaurar. Seus dados atuais foram mantidos.', true); }
@@ -260,10 +261,15 @@ async function restaurarBackup(arquivo, msg) {
 /* ---------- Fechamento do mês ---------- */
 const ymDe = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 // Receitas = salários fixos pelo valor MÉDIO (ainda não há confirmação do valor real) + receitas lançadas e recebidas.
-function resumoMes(cfg, lancs, ym) {
+function resumoMes(cfg, lancs, ym, ignorados = []) {
   const ini = new Date(cfg.saldoEm), iniYM = ymDe(ini);
   const doMes = lancs.filter(l => l.data.startsWith(ym));
-  const fixos = cfg.recebimentos.filter(r => ym > iniYM || (ym === iniYM && r.dia >= ini.getDate())).reduce((t, r) => t + r.medio, 0);
+  const [yy, mm] = ym.split('-').map(Number);
+  const fixos = cfg.recebimentos.filter(r => {
+    if (!(ym > iniYM || (ym === iniYM && r.dia >= ini.getDate()))) return false;
+    const key = `${r.quem}${r.dia}-${isoDe(new Date(yy, mm - 1, Math.min(r.dia, new Date(yy, mm, 0).getDate())))}`;
+    return !lancs.some(l => l.recebKey === key) && !ignorados.includes(key); // confirmado/ignorado não é mais estimativa
+  }).reduce((t, r) => t + r.medio, 0);
   const soma = a => a.reduce((t, l) => t + l.valor, 0);
   const rec = soma(doMes.filter(l => l.tipo === 'receita' && l.pago));
   const desp = doMes.filter(l => l.tipo === 'despesa'), pagas = desp.filter(l => l.pago), pend = desp.filter(l => !l.pago);
@@ -296,6 +302,51 @@ function curvaHoje(curva, margem, marcos, iMin) {
   return `<svg class="curva" viewBox="0 0 360 134" role="img" aria-label="Saldo projetado nos próximos ${n} dias">${ticks}
     <line class="margem" x1="${X0}" x2="${X0 + XW}" y1="${y(margem)}" y2="${y(margem)}"/><text class="rotulo" x="${X0 + XW}" y="${y(margem) - 4}" text-anchor="end">margem</text>
     <path class="linha" d="${d}"/><circle class="ponto" cx="${x(0)}" cy="${y(curva[0])}" r="4.5"/>${aperto}<text class="rotulo" x="${X0}" y="11">hoje</text></svg>`;
+}
+
+/* ---------- Confirmação de recebimentos e lembretes ---------- */
+// Pagamentos fixos que já aconteceram (até 45 dias) e ainda não foram confirmados nem ignorados
+function recebimentosAConfirmar(cfg, lancs, ignorados) {
+  const ini = new Date(cfg.saldoEm), iniDia = new Date(ini.getFullYear(), ini.getMonth(), ini.getDate()), h = new Date(), saida = [];
+  cfg.recebimentos.forEach(r => {
+    for (let m = -2; m <= 0; m++) {
+      const ult = new Date(h.getFullYear(), h.getMonth() + m + 1, 0).getDate();
+      const d = new Date(h.getFullYear(), h.getMonth() + m, Math.min(r.dia, ult)), n = diasAte(d);
+      if (n > 0 || n < -45 || d < iniDia) continue;
+      const key = `${r.quem}${r.dia}-${isoDe(d)}`;
+      if (lancs.some(l => l.recebKey === key) || ignorados.includes(key)) continue;
+      saida.push({ key, r, d });
+    }
+  });
+  return saida.sort((a, b) => a.d - b.d);
+}
+
+// Arquivo .ics com alarmes: contas pendentes (véspera e dia, 9h) e dias de pagamento (18h)
+function gerarICS(cfg, lancs) {
+  const pad = n => String(n).padStart(2, '0'), h = new Date();
+  const dt = (d, hm) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${hm}00`;
+  const tx = t => String(t).replace(/\\/g, '\\\\').replace(/[,;]/g, m => '\\' + m).replace(/\n/g, '\\n');
+  const carimbo = `${h.getUTCFullYear()}${pad(h.getUTCMonth() + 1)}${pad(h.getUTCDate())}T${pad(h.getUTCHours())}${pad(h.getUTCMinutes())}${pad(h.getUTCSeconds())}Z`;
+  const ev = (uid, d, ini, fim, titulo, descr, alarmes) => ['BEGIN:VEVENT', `UID:${uid}`, `DTSTAMP:${carimbo}`, `DTSTART:${dt(d, ini)}`, `DTEND:${dt(d, fim)}`,
+    `SUMMARY:${tx(titulo)}`, `DESCRIPTION:${tx(descr)}`, ...alarmes.flatMap(t => ['BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${tx(titulo)}`, `TRIGGER:${t}`, 'END:VALARM']), 'END:VEVENT'];
+  const linhas = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Folga//PT-BR//', 'CALSCALE:GREGORIAN', 'X-WR-CALNAME:Folga'];
+  let nC = 0, nR = 0;
+  lancs.filter(l => l.tipo === 'despesa' && !l.pago).forEach(l => {
+    const d = new Date(l.data + 'T00:00:00'), n = diasAte(d);
+    if (n < 0 || n > 120) return;
+    nC++; linhas.push(...ev(`folga-c${l.id}@folga.app`, d, '0900', '0930', `Pagar: ${l.desc} (${brl(l.valor)})`, 'Lembrete do Folga. Depois de pagar, marque como paga no app.', ['-P1D', 'PT0S']));
+  });
+  const dias = new Map();
+  cfg.recebimentos.forEach(r => {
+    for (let m = 0; m < 3; m++) {
+      const ult = new Date(h.getFullYear(), h.getMonth() + m + 1, 0).getDate();
+      const d = new Date(h.getFullYear(), h.getMonth() + m, Math.min(r.dia, ult)), n = diasAte(d);
+      if (n >= 0 && n <= 62) { const k = isoDe(d), g = dias.get(k) || { d, nomes: new Set() }; g.nomes.add(cfg.nomes[r.quem]); dias.set(k, g); }
+    }
+  });
+  dias.forEach((g, k) => { nR++; linhas.push(...ev(`folga-r${k}@folga.app`, g.d, '1800', '1815', `Confirmar recebimento no Folga (${[...g.nomes].join(' + ')})`, 'Abra o Folga e informe o valor que chegou.', ['PT0S'])); });
+  linhas.push('END:VCALENDAR');
+  return { texto: linhas.join('\r\n'), nC, nR };
 }
 
 /* ---------- Telas ---------- */
@@ -371,6 +422,11 @@ const telas = {
     const lancs = await LANC.todos();
     const p = projetar(cfg, lancs), longo = projetarLongo(cfg, lancs, [], 30);
     const ub = await DB.ler('ultimoBackup'), semBackup = !ub || Date.now() - ub > 30 * 864e5;
+    const ign = (await DB.ler('recebIgnorados')) || [], aConf = recebimentosAConfirmar(cfg, lancs, ign);
+    const confHtml = aConf.length ? `<div class="aviso-card"><b>Confirme o que chegou</b><p class="pequeno">Informe o valor real recebido para o saldo ficar certo.</p>${aConf.map((x, i) => `
+      <div class="conf" data-i="${i}"><div class="confh">Dia ${x.d.getDate()} · ${esc(cfg.nomes[x.r.quem])}</div>
+        <input class="cval" inputmode="numeric" data-c="${x.r.medio}">
+        <div class="duas"><button class="botao" data-a="ok">Confirmar</button><button class="botao sec" data-a="ig">Ignorar</button></div></div>`).join('')}</div>` : '';
     const hojeI = hojeISO();
     const pend = lancs.filter(l => l.tipo === 'despesa' && !l.pago).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
     const noCiclo = pend.filter(l => Math.max(0, diasAte(new Date(l.data + 'T00:00:00'))) < p.dias);
@@ -392,7 +448,7 @@ const telas = {
     }).join('');
 
     area.innerHTML = `
-      <h1>Olá, ${esc(cfg.nomes.eu)}</h1>
+      <h1>Olá, ${esc(cfg.nomes.eu)}</h1>${confHtml}
       <p class="contexto" style="margin:2px 0 0">Você pode gastar hoje</p>
       <div class="gigante"><small>R$</small>${Math.floor(Math.max(p.livre, 0) / 100)}</div>
       <span class="chip ${cls}">${rotulo}</span>
@@ -419,6 +475,7 @@ const telas = {
 
       <div class="sec-t">Mais</div>
       <button class="linkrow" id="fech"><span>Fechamento do mês</span><span>›</span></button>
+      <button class="linkrow" id="lemb"><span>Lembretes no Calendário</span><span>›</span></button>
       <button class="linkrow" id="bkp"><span>Backup e restauração${semBackup ? '<b class="tag">fazer agora</b>' : ''}</span><span>›</span></button>
       <button class="linkrow" id="editar"><span>Editar recebimentos e saldo</span><span>›</span></button>`;
 
@@ -429,7 +486,40 @@ const telas = {
     const todas = area.querySelector('#todas'); if (todas) todas.onclick = () => { filtro = 'pendentes'; mostrar('contas'); };
     area.querySelector('#fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
     area.querySelector('#bkp').onclick = () => mostrar('backup');
+    area.querySelector('#lemb').onclick = () => mostrar('lembretes');
+    area.querySelectorAll('.conf').forEach(el => {
+      const x = aConf[+el.dataset.i], campo = el.querySelector('.cval'); ligarDinheiro(campo);
+      el.querySelector('[data-a=ok]').onclick = async () => {
+        const valor = +(campo.dataset.c || 0);
+        if (valor <= 0) return alert('Informe um valor maior que zero.');
+        await LANC.salvar({ tipo: 'receita', desc: 'Salário ' + cfg.nomes[x.r.quem], valor, data: isoDe(x.d), pago: true, pagoEm: Date.now(), categoria: null, recebKey: x.key });
+        mostrar('hoje');
+      };
+      el.querySelector('[data-a=ig]').onclick = async () => {
+        if (!confirm('Ignorar este recebimento? Ele não será contado no saldo nem no fechamento.')) return;
+        await DB.gravar('recebIgnorados', [...ign, x.key]); mostrar('hoje');
+      };
+    });
     area.querySelector('#editar').onclick = () => formConfig(cfg, p.saldoAtual);
+  },
+  async lembretes() {
+    const cfg = await DB.ler('config'), lancs = await LANC.todos();
+    const { nC, nR } = gerarICS(cfg, lancs);
+    area.innerHTML = `<div class="form"><h2>Lembretes no Calendário</h2>
+      <p class="intro">O iPhone não deixa um app instalado pelo Safari agendar notificações sozinho. A solução sem servidor é criar eventos com alarme no app Calendário, que avisa mesmo com o Folga fechado.</p>
+      <p class="contexto">Serão criados <b>${nC}</b> lembretes de contas (véspera às 9h e no dia às 9h) e <b>${nR}</b> avisos "Confirmar recebimento" (às 18h do dia do pagamento).</p>
+      <button class="botao" id="gerar">Gerar lembretes</button>
+      <p class="pequeno" style="margin-top:18px"><b>Como usar</b><br>1. No app Calendário, crie um calendário chamado Folga.<br>2. Toque em Gerar lembretes e salve ou abra o arquivo.<br>3. Abra o arquivo e toque em Adicionar tudo, escolhendo o calendário Folga.<br>4. Para atualizar (contas novas ou já pagas), apague o calendário Folga, crie de novo e gere outro arquivo.</p>
+      <p id="msg" role="status"></p><button class="botao sec" id="voltar" style="margin-top:20px">Voltar</button></div>`;
+    area.querySelector('#voltar').onclick = () => mostrar('hoje');
+    area.querySelector('#gerar').onclick = async () => {
+      const arq = new File([gerarICS(cfg, await LANC.todos()).texto], 'folga-lembretes.ics', { type: 'text/calendar' }), m = area.querySelector('#msg');
+      try {
+        if (navigator.canShare && navigator.canShare({ files: [arq] })) await navigator.share({ files: [arq], title: 'Lembretes Folga' });
+        else { const url = URL.createObjectURL(arq), a = document.createElement('a'); a.href = url; a.download = arq.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000); }
+        m.className = 'ok'; m.textContent = 'Arquivo gerado. Abra-o e toque em Adicionar tudo.';
+      } catch (e) { m.className = 'erro'; m.textContent = e.name === 'AbortError' ? 'Cancelado.' : 'Não foi possível gerar o arquivo.'; }
+    };
   },
   async recorrentes() {
     const lista = (await DB.ler('recorrentes')) || [];
@@ -473,7 +563,8 @@ const telas = {
     const atualYM = ymDe(new Date());
     const minYM = [ymDe(new Date(cfg.saldoEm)), ...lancs.map(l => l.data.slice(0, 7))].sort()[0];
     const ym = mesFech || atualYM, [y, m] = ym.split('-').map(Number);
-    const r = resumoMes(cfg, lancs, ym), ant = resumoMes(cfg, lancs, ymDe(new Date(y, m - 2, 1)));
+    const ign = (await DB.ler('recebIgnorados')) || [];
+    const r = resumoMes(cfg, lancs, ym, ign), ant = resumoMes(cfg, lancs, ymDe(new Date(y, m - 2, 1)), ign);
     const nomeMes = new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
     const dif = r.saldo - ant.saldo;
     const max = r.cats.length ? r.cats[0][1] : 1;
@@ -481,15 +572,15 @@ const telas = {
       <p class="contexto" style="margin-bottom:0">${ym === atualYM ? 'Mês em andamento · ' : ''}Resultado do mês</p>
       <div class="gigante ${r.saldo >= 0 ? 'pos' : 'neg'}" style="font-size:48px">${brl(r.saldo)}</div>
       <div class="lista">
-        <div><span>Salários (valor médio cadastrado)</span><span>${brl(r.fixos)}</span></div>
-        <div><span>Outras receitas recebidas</span><span>${brl(r.rec)}</span></div>
+        <div><span>Salários previstos (valor médio)</span><span>${brl(r.fixos)}</span></div>
+        <div><span>Receitas recebidas (inclui salários confirmados)</span><span>${brl(r.rec)}</span></div>
         <div><span>Despesas pagas (${r.nPagas})</span><span>${brl(r.pagas)}</span></div>
         <div><span>Despesas pendentes (${r.nPend})</span><span>${brl(r.pend)}</span></div>
       </div>
       ${r.cats.length ? `<p class="contexto" style="margin-top:22px">Maior categoria de gasto: <b>${esc(r.cats[0][0])}</b> (${brl(r.cats[0][1])})</p>` +
         r.cats.slice(0, 6).map(([c, v]) => `<div class="cat"><div class="topo"><span>${esc(c)}</span><span>${brl(v)}</span></div><div class="barra" style="width:${Math.max(3, Math.round(v / max * 100))}%"></div></div>`).join('') : ''}
       ${ant.temDados ? `<p class="aviso" style="margin-top:22px">${dif >= 0 ? 'Seu saldo aumentou ' + brl(dif) : 'Seu saldo ficou ' + brl(-dif) + ' menor'} em relação ao mês anterior.</p>` : ''}
-      <p class="pequeno" style="margin-top:14px">Gastos por categoria somam despesas pagas e pendentes do mês. Os salários entram pelo valor médio, não pelo valor real recebido.</p>`;
+      <p class="pequeno" style="margin-top:14px">Gastos por categoria somam despesas pagas e pendentes do mês. Salários ainda não confirmados entram pelo valor médio.</p>`;
     area.innerHTML = `<h1>Fechamento do mês</h1>
       <div class="mesnav"><button id="ant" aria-label="Mês anterior" ${ym <= minYM ? 'disabled' : ''}>‹</button><span>${nomeMes}</span><button id="prox" aria-label="Próximo mês" ${ym >= atualYM ? 'disabled' : ''}>›</button></div>
       ${corpo}<button class="botao sec" id="voltar" style="margin-top:24px">Voltar</button>`;
@@ -621,9 +712,9 @@ const fab = document.createElement('button'); fab.className = 'fab'; fab.textCon
 fab.onclick = () => abrirLancamento(); document.body.appendChild(fab);
 
 async function mostrar(nome) {
-  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : (nome === 'backup' || nome === 'fechamento') ? 'hoje' : nome)));
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('ativa', b.dataset.tela === (nome === 'recorrentes' ? 'contas' : ['backup', 'fechamento', 'lembretes'].includes(nome) ? 'hoje' : nome)));
   await telas[nome]();
-  window.scrollTo(0, 0);
+  area.scrollTop = 0;
 }
 document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => mostrar(b.dataset.tela)));
 gerarRecorrentes().catch(() => {}).then(() => mostrar('hoje'));

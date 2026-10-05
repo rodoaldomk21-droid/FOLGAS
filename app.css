@@ -128,3 +128,13 @@ main { padding-bottom: 170px; }
 .linkrow span:last-child { color: var(--suave); }
 .curva .marco { stroke: var(--linha); stroke-width: 1.5; stroke-dasharray: 2 4; }
 .curva .ponto { fill: var(--destaque); }
+/* Etapa 11: só a área de conteúdo rola; o rodapé fica fixo no lugar */
+html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+body { height: 100dvh; display: flex; flex-direction: column; }
+main { flex: 1 1 auto; min-height: 0; width: 100%; max-width: none; margin: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; padding: 28px max(22px, calc(50% - 238px)) 110px; }
+nav { position: static; flex: none; }
+.fab { bottom: calc(68px + env(safe-area-inset-bottom)); }
+/* confirmação de recebimentos */
+.aviso-card { background: var(--papel); border: 1px solid var(--destaque); border-radius: 14px; padding: 16px; margin: 14px 0 6px; }
+.conf { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--linha); }
+.confh { font-weight: 600; margin-bottom: 8px; }
