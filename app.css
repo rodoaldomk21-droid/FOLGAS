@@ -141,3 +141,38 @@ nav { position: static; flex: none; }
 /* Etapa 12: sugestões */
 .sugestao { background: var(--papel); border-left: 3px solid var(--ambar); border-radius: 0 12px 12px 0; padding: 14px 16px; margin-top: 12px; }
 .sugestao p { margin-bottom: 2px; }
+/* Etapa 13: atalhos e menos rolagem */
+.gigante.m { font-size: clamp(56px, 18vw, 76px); margin: 2px 0; }
+.linhachip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 4px; }
+.linhachip .chip { margin: 0; }
+.linhachip .contexto { margin: 0; font-size: 15px; }
+.atalhos { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0 8px; margin-top: 10px; scrollbar-width: none; }
+.atalhos::-webkit-scrollbar { display: none; }
+.atalho { flex: none; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 1px solid var(--linha); background: var(--papel); color: var(--tinta); border-radius: 12px; padding: 9px 12px; font: inherit; font-size: 14px; }
+.atalho span { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--suave); font-size: 13px; }
+.atalho b { font-variant-numeric: tabular-nums; }
+.atalho.receita b { color: var(--subida); }
+.atalho.fixo { flex-direction: row; align-items: center; font-weight: 700; padding: 12px 14px; border-color: var(--destaque); color: var(--destaque); }
+.det { border-bottom: 1px solid var(--linha); }
+.det summary { list-style: none; display: flex; justify-content: space-between; align-items: center; padding: 16px 0; font-weight: 600; cursor: pointer; }
+.det summary::-webkit-details-marker { display: none; }
+.det summary::after { content: '›'; transform: rotate(90deg); color: var(--suave); font-size: 22px; }
+.det[open] summary::after { transform: rotate(-90deg); }
+.det.sugd summary { color: var(--ambar); }
+.det .corpo { padding-bottom: 14px; }
+.toast { position: fixed; top: calc(env(safe-area-inset-top) + 8px); left: 12px; right: 12px; max-width: 496px; margin: 0 auto; z-index: 30; display: flex; align-items: center; gap: 12px; background: var(--tinta); color: var(--fundo); border-radius: 14px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.3); font-size: 15px; }
+.toast span { flex: 1; }
+.toast button { border: 0; background: none; color: var(--fundo); font: inherit; font-weight: 700; text-decoration: underline; padding: 4px; }
+/* lista de contas compacta */
+.cv { padding: 12px 0; border-bottom: 1px solid var(--linha); cursor: pointer; }
+.cv .l1 { display: flex; align-items: baseline; gap: 10px; }
+.cv .data { width: 58px; flex: none; font-size: 13px; color: var(--suave); text-transform: uppercase; }
+.cv .desc { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv .val { font-weight: 700; font-variant-numeric: tabular-nums; }
+.cv .val.rec { color: var(--subida); }
+.cv .sub { font-size: 12px; color: var(--suave); margin: 2px 0 0 68px; }
+.cv .acoes { display: none; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+.cv.aberto .acoes { display: flex; }
+.cv.paga .desc { color: var(--suave); text-decoration: line-through; }
+.cv .acoes button { border: 1px solid var(--linha); background: none; color: var(--suave); border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600; font-size: 14px; }
+.cv .acoes button.pagar { color: var(--destaque); border-color: var(--destaque); }

@@ -403,6 +403,34 @@ function menorParcelamento(cfg, lancs, total, base, de = 2) {
   return null;
 }
 
+/* ---------- Atalhos rápidos ---------- */
+const telaAtual = () => document.querySelector('nav .ativa').dataset.tela;
+// Lançamentos que você repete (2+ vezes nos últimos 90 dias), mais frequentes primeiro
+function atalhosFrequentes(lancs) {
+  const limite = isoDe(new Date(Date.now() - 90 * 864e5)), m = new Map();
+  lancs.filter(l => l.pago && !l.recorrenteId && !l.grupo && !l.recebKey && l.data >= limite).sort((a, b) => a.data.localeCompare(b.data)).forEach(l => {
+    const k = l.tipo + '|' + l.desc.trim().toLowerCase(), g = m.get(k) || { n: 0 };
+    m.set(k, Object.assign(g, { n: g.n + 1, tipo: l.tipo, desc: l.desc, valor: l.valor, categoria: l.categoria || null, ult: l.data })); // o último valor usado vale
+  });
+  return [...m.values()].filter(g => g.n >= 2).sort((a, b) => b.n - a.n || b.ult.localeCompare(a.ult)).slice(0, 8);
+}
+function avisar(texto, acoes) {
+  const antigo = document.querySelector('.toast'); if (antigo) antigo.remove();
+  const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status');
+  t.innerHTML = `<span>${esc(texto)}</span>` + acoes.map((a, i) => `<button data-i="${i}">${a[0]}</button>`).join('');
+  t.querySelectorAll('button').forEach(b => b.onclick = () => { t.remove(); acoes[+b.dataset.i][1](); });
+  document.body.appendChild(t); setTimeout(() => t.remove(), 7000);
+}
+// Um toque: registra hoje, já pago, com o último valor e categoria; dá para desfazer ou editar
+async function registrarAtalho(g) {
+  const l = { tipo: g.tipo, desc: g.desc, valor: g.valor, data: hojeISO(), pago: true, pagoEm: Date.now(), categoria: g.tipo === 'despesa' ? g.categoria : null };
+  l.id = await LANC.salvar(l);
+  await mostrar(telaAtual());
+  avisar(`${g.tipo === 'receita' ? 'Receita' : 'Despesa'} registrada: ${g.desc} · ${brl(g.valor)}`, [
+    ['Desfazer', async () => { await LANC.apagar(l.id); mostrar(telaAtual()); }],
+    ['Editar', () => abrirLancamento(l)]]);
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -467,7 +495,7 @@ async function salvarConfig() {
   mostrar('hoje');
 }
 
-let filtro = 'pendentes', mesFech = null;
+let filtro = 'pendentes', mesFech = null, limiteContas = 15;
 const telas = {
   async hoje() {
     const cfg = await DB.ler('config');
@@ -478,26 +506,25 @@ const telas = {
     const ub = await DB.ler('ultimoBackup'), semBackup = !ub || Date.now() - ub > 30 * 864e5;
     const ign = (await DB.ler('recebIgnorados')) || [], aConf = recebimentosAConfirmar(cfg, lancs, ign);
     const recs = (await DB.ler('recorrentes')) || [], disp = (await DB.ler('sugDispensadas')) || [];
-    const sugs = sugestoesAjuste(cfg, lancs, recs, disp), ritmo = ritmoDeGasto(lancs);
-    const sugHtml = sugs.length ? `<div class="sec-t">Sugestões do Folga</div>${sugs.map((x, i) => `
-      <div class="sugestao" data-i="${i}"><p>${esc(x.texto)}</p><div class="duas"><button class="botao" data-a="aceitar">Atualizar</button><button class="botao sec" data-a="dispensar">Dispensar</button></div></div>`).join('')}` : '';
-    const ritmoHtml = ritmo ? `<p class="pequeno" style="margin-top:6px">Seu ritmo recente de gastos: <b>${brl(ritmo.porDia)}</b> por dia (últimos ${ritmo.dias} dias)${p.livre >= 0 ? (ritmo.porDia > p.livre ? ', acima do que cabe.' : ', dentro do que cabe.') : '.'}</p>` : '';
-    const confHtml = aConf.length ? `<div class="aviso-card"><b>Confirme o que chegou</b><p class="pequeno">Informe o valor real recebido para o saldo ficar certo.</p>${aConf.map((x, i) => `
-      <div class="conf" data-i="${i}"><div class="confh">Dia ${x.d.getDate()} · ${esc(cfg.nomes[x.r.quem])}</div>
-        <input class="cval" inputmode="numeric" data-c="${x.r.medio}">
-        <div class="duas"><button class="botao" data-a="ok">Confirmar</button><button class="botao sec" data-a="ig">Ignorar</button></div></div>`).join('')}</div>` : '';
+    const sugs = sugestoesAjuste(cfg, lancs, recs, disp), ritmo = ritmoDeGasto(lancs), atalhos = atalhosFrequentes(lancs);
     const hojeI = hojeISO();
     const pend = lancs.filter(l => l.tipo === 'despesa' && !l.pago).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
     const noCiclo = pend.filter(l => Math.max(0, diasAte(new Date(l.data + 'T00:00:00'))) < p.dias);
     const sobra = p.saldoAtual - p.comprometido - cfg.margem, fim = p.fim.getDate();
     const [cls, rotulo] = sobra < 0 ? ['ruim', 'Sem folga hoje'] : longo.min < cfg.margem ? ['medio', 'Atenção nos próximos dias'] : ['ok', 'Tranquilo'];
-    const apertoTxt = `Ponto mais baixo nos próximos 30 dias: <b>${brl(longo.min)}</b> em ${diaDoIndice(longo.iMin)}${longo.min < cfg.margem ? ', abaixo da sua margem' : ''}.`;
+    const apertoTxt = `Ponto mais baixo em 30 dias: <b>${brl(longo.min)}</b> em ${diaDoIndice(longo.iMin)}${longo.min < cfg.margem ? ', abaixo da margem' : ''}.`;
+    const sub = sobra < 0 ? `Evite gastos até o dia ${fim}` : p.dias > 1 ? `por dia, até o dia ${fim} (${p.dias} dias)` : `até o dia ${fim}`;
 
-    const venc = pend.slice(0, 5).map(l => `
+    const confHtml = aConf.length ? `<div class="aviso-card"><b>Confirme o que chegou</b><p class="pequeno">Informe o valor real recebido para o saldo ficar certo.</p>${aConf.map((x, k) => `
+      <div class="conf" data-i="${k}"><div class="confh">Dia ${x.d.getDate()} · ${esc(cfg.nomes[x.r.quem])}</div>
+        <input class="cval" inputmode="numeric" data-c="${x.r.medio}">
+        <div class="duas"><button class="botao" data-a="ok">Confirmar</button><button class="botao sec" data-a="ig">Ignorar</button></div></div>`).join('')}</div>` : '';
+    const ritmoHtml = ritmo ? `<p class="pequeno" style="margin-top:2px">Seu ritmo recente: <b>${brl(ritmo.porDia)}</b>/dia${p.livre >= 0 ? (ritmo.porDia > p.livre ? ', acima do que cabe.' : ', dentro do que cabe.') : '.'}</p>` : '';
+    const atalhosHtml = `<div class="atalhos"><button class="atalho fixo" id="nd">− Despesa</button><button class="atalho fixo" id="nr">+ Receita</button>${atalhos.map((g, k) => `<button class="atalho ${g.tipo}" data-i="${k}"><span>${esc(g.desc)}</span><b>${g.tipo === 'receita' ? '+ ' : ''}${brl(g.valor)}</b></button>`).join('')}</div>`;
+    const venc = pend.slice(0, 3).map(l => `
       <div class="venc"><div class="d">${dataCurta(l.data)}</div>
         <div class="m">${esc(l.desc)}${l.data < hojeI ? '<span class="tag">atrasada</span>' : ''}</div>
         <div class="v">${brl(l.valor)}</div><button class="mini" data-id="${l.id}">Paguei</button></div>`).join('');
-
     const grupos = {}; const h = new Date();
     cfg.recebimentos.forEach(r => { const d = proximaData(r.dia, h), k = isoDe(d); (grupos[k] = grupos[k] || { d, itens: [] }).itens.push(r); });
     const receb = Object.values(grupos).sort((a, b) => a.d - b.d).slice(0, 3).map(g => {
@@ -509,37 +536,31 @@ const telas = {
     area.innerHTML = `
       <h1>Olá, ${esc(cfg.nomes.eu)}</h1>${confHtml}
       <p class="contexto" style="margin:2px 0 0">Você pode gastar hoje</p>
-      <div class="gigante"><small>R$</small>${Math.floor(Math.max(p.livre, 0) / 100)}</div>
-      <span class="chip ${cls}">${rotulo}</span>
-      <p class="contexto" style="margin-top:8px">${sobra < 0 ? `Evite novos gastos até o dia ${fim}.` : p.dias > 1 ? `Por dia, até o dia ${fim} (${p.dias} dias).` : `Até o dia ${fim}, quando chegam os recebimentos.`}</p>
-
-      ${ritmoHtml}
-      <div class="sec-t">Como chegamos nesse número</div>
-      <div class="extrato">
+      <div class="gigante m"><small>R$</small>${Math.floor(Math.max(p.livre, 0) / 100)}</div>
+      <div class="linhachip"><span class="chip ${cls}">${rotulo}</span><span class="contexto">${sub}</span></div>
+      ${ritmoHtml}${atalhosHtml}
+      ${curvaHoje(longo.curva, cfg.margem, marcosRecebimento(cfg, 30), longo.iMin)}
+      <p class="contexto" style="font-size:15px;margin-bottom:0">${apertoTxt}</p>
+      <div class="sec-t" style="margin-top:22px">Vence em breve</div>
+      ${venc || '<p class="contexto">Nenhuma conta pendente.</p>'}
+      ${pend.length > 3 ? `<button class="linkrow" id="todas"><span>Ver todas as pendentes (${pend.length})</span><span>›</span></button>` : ''}
+      <details class="det" style="margin-top:14px"><summary>Como chegamos nesse número</summary><div class="corpo extrato">
         <div><span>Saldo hoje</span><span>${brl(p.saldoAtual)}</span></div>
         <div class="menos"><span>Contas até o dia ${fim} (${noCiclo.length})</span><span>− ${brl(p.comprometido)}</span></div>
         <div class="menos"><span>Margem de segurança</span><span>− ${brl(cfg.margem)}</span></div>
-        <div class="tot"><span>${sobra >= 0 ? 'Sobra' : 'Falta'}</span><span class="${sobra >= 0 ? 'pos' : 'neg'}">${brl(Math.abs(sobra))}</span></div>
-      </div>
+        <div class="tot"><span>${sobra >= 0 ? 'Sobra' : 'Falta'}</span><span class="${sobra >= 0 ? 'pos' : 'neg'}">${brl(Math.abs(sobra))}</span></div></div></details>
+      ${sugs.length ? `<details class="det sugd" open><summary>Sugestões do Folga (${sugs.length})</summary><div class="corpo">${sugs.map((x, k) => `
+        <div class="sugestao" data-i="${k}"><p>${esc(x.texto)}</p><div class="duas"><button class="botao" data-a="aceitar">Atualizar</button><button class="botao sec" data-a="dispensar">Dispensar</button></div></div>`).join('')}</div></details>` : ''}
+      <details class="det"><summary>Próximos recebimentos (valor mínimo)</summary><div class="corpo lista" style="margin-top:0">${receb}</div></details>
+      <details class="det"><summary>Mais${semBackup ? ' <b class="tag">backup pendente</b>' : ''}</summary><div class="corpo">
+        <button class="linkrow" id="fech"><span>Fechamento do mês</span><span>›</span></button>
+        <button class="linkrow" id="lemb"><span>Lembretes no Calendário</span><span>›</span></button>
+        <button class="linkrow" id="bkp"><span>Backup e restauração${semBackup ? '<b class="tag">fazer agora</b>' : ''}</span><span>›</span></button>
+        <button class="linkrow" id="editar"><span>Editar recebimentos e saldo</span><span>›</span></button></div></details>`;
 
-      <div class="sec-t">Próximos 30 dias</div>
-      ${curvaHoje(longo.curva, cfg.margem, marcosRecebimento(cfg, 30), longo.iMin)}
-      <p class="contexto" style="font-size:15px">${apertoTxt}</p>
-
-      ${sugHtml}
-      <div class="sec-t">Vence em breve</div>
-      ${venc || '<p class="contexto">Nenhuma conta pendente.</p>'}
-      ${pend.length > 5 ? `<button class="linkrow" id="todas"><span>Ver todas as pendentes (${pend.length})</span><span>›</span></button>` : ''}
-
-      <div class="sec-t">Próximos recebimentos · valor mínimo</div>
-      <div class="lista" style="margin-top:0">${receb}</div>
-
-      <div class="sec-t">Mais</div>
-      <button class="linkrow" id="fech"><span>Fechamento do mês</span><span>›</span></button>
-      <button class="linkrow" id="lemb"><span>Lembretes no Calendário</span><span>›</span></button>
-      <button class="linkrow" id="bkp"><span>Backup e restauração${semBackup ? '<b class="tag">fazer agora</b>' : ''}</span><span>›</span></button>
-      <button class="linkrow" id="editar"><span>Editar recebimentos e saldo</span><span>›</span></button>`;
-
+    area.querySelector('#nd').onclick = () => abrirLancamento(null, 'despesa');
+    area.querySelector('#nr').onclick = () => abrirLancamento(null, 'receita');
+    area.querySelectorAll('.atalho[data-i]').forEach(b => b.onclick = () => registrarAtalho(atalhos[+b.dataset.i]));
     area.querySelectorAll('.mini').forEach(b => b.onclick = async () => {
       const l = pend.find(x => x.id === +b.dataset.id); l.pago = true; l.pagoEm = Date.now();
       await LANC.salvar(l); mostrar('hoje');
@@ -548,18 +569,7 @@ const telas = {
     area.querySelector('#fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
     area.querySelector('#bkp').onclick = () => mostrar('backup');
     area.querySelector('#lemb').onclick = () => mostrar('lembretes');
-    area.querySelectorAll('.sugestao').forEach(el => {
-      const x = sugs[+el.dataset.i];
-      el.querySelector('[data-a=dispensar]').onclick = async () => { await DB.gravar('sugDispensadas', [...disp, x.key]); mostrar('hoje'); };
-      el.querySelector('[data-a=aceitar]').onclick = async () => {
-        if (x.tipo === 'rec') { cfg.recebimentos[x.i].minimo = x.min; cfg.recebimentos[x.i].medio = x.med; await DB.gravar('config', cfg); }
-        else {
-          const lista = (await DB.ler('recorrentes')) || [], r = lista.find(y => y.id === x.id); r.valor = x.valor; await DB.gravar('recorrentes', lista);
-          for (const y of lancs.filter(z => z.recorrenteId === x.id && !z.pago && z.data >= hojeI)) { y.valor = x.valor; await LANC.salvar(y); }
-        }
-        mostrar('hoje');
-      };
-    });
+    area.querySelector('#editar').onclick = () => formConfig(cfg, p.saldoAtual);
     area.querySelectorAll('.conf').forEach(el => {
       const x = aConf[+el.dataset.i], campo = el.querySelector('.cval'); ligarDinheiro(campo);
       el.querySelector('[data-a=ok]').onclick = async () => {
@@ -573,7 +583,18 @@ const telas = {
         await DB.gravar('recebIgnorados', [...ign, x.key]); mostrar('hoje');
       };
     });
-    area.querySelector('#editar').onclick = () => formConfig(cfg, p.saldoAtual);
+    area.querySelectorAll('.sugestao').forEach(el => {
+      const x = sugs[+el.dataset.i];
+      el.querySelector('[data-a=dispensar]').onclick = async () => { await DB.gravar('sugDispensadas', [...disp, x.key]); mostrar('hoje'); };
+      el.querySelector('[data-a=aceitar]').onclick = async () => {
+        if (x.tipo === 'rec') { cfg.recebimentos[x.i].minimo = x.min; cfg.recebimentos[x.i].medio = x.med; await DB.gravar('config', cfg); }
+        else {
+          const lista = (await DB.ler('recorrentes')) || [], r = lista.find(y => y.id === x.id); r.valor = x.valor; await DB.gravar('recorrentes', lista);
+          for (const y of lancs.filter(z => z.recorrenteId === x.id && !z.pago && z.data >= hojeI)) { y.valor = x.valor; await LANC.salvar(y); }
+        }
+        mostrar('hoje');
+      };
+    });
   },
   async lembretes() {
     const cfg = await DB.ler('config'), lancs = await LANC.todos();
@@ -726,19 +747,25 @@ const telas = {
   async contas() {
     const todos = (await LANC.todos()).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
     const vis = filtro === 'pendentes' ? todos.filter(l => !l.pago) : todos;
-    const itens = vis.map(l => `
-      <div class="item ${l.pago ? 'paga' : ''}" data-id="${l.id}">
-        <div><div class="data">${dataCurta(l.data)}${l.categoria ? ' · ' + esc(l.categoria) : ''}${l.pago ? '' : ' · pendente'}</div><div class="desc">${esc(l.desc)}</div></div>
-        <div><div class="val ${l.tipo === 'receita' ? 'rec' : 'desp'}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</div>
-          <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div>
-      </div>`).join('');
+    const MES = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }); };
+    let mesAtual = '';
+    const itens = vis.slice(0, limiteContas).map(l => {
+      const cab = l.data.slice(0, 7) !== mesAtual ? `<div class="sec-t" style="margin-top:22px;text-transform:capitalize">${MES(mesAtual = l.data.slice(0, 7))}</div>` : '';
+      const sub = [l.categoria, l.pago ? '' : (l.data < hojeISO() ? 'atrasada' : 'pendente')].filter(Boolean).map(esc).join(' · ');
+      return cab + `<div class="cv ${l.pago ? 'paga' : ''}" data-id="${l.id}"><div class="l1"><span class="data">${dataCurta(l.data)}</span><span class="desc">${esc(l.desc)}</span><span class="val ${l.tipo === 'receita' ? 'rec' : ''}">${l.tipo === 'receita' ? '+ ' : '− '}${brl(l.valor)}</span></div>${sub ? `<div class="sub">${sub}</div>` : ''}
+        <div class="acoes"><button class="pagar" data-a="alt">${l.pago ? 'Desfazer' : (l.tipo === 'receita' ? 'Recebi' : 'Paguei')}</button><button data-a="ed">Editar</button><button data-a="del">Excluir</button></div></div>`;
+    }).join('');
+    const maisBtn = vis.length > limiteContas ? `<button class="botao sec" id="mais" style="margin-top:16px">Mostrar mais (${vis.length - limiteContas})</button>` : '';
     area.innerHTML = `<h1>Contas</h1>
       <button class="botao sec" id="rec" style="margin-top:12px">Contas recorrentes</button>
       <div class="filtros"><button data-f="pendentes" class="${filtro === 'pendentes' ? 'on' : ''}">Pendentes</button><button data-f="todos" class="${filtro === 'todos' ? 'on' : ''}">Todas</button></div>
-      ${itens || '<p class="contexto" style="margin-top:24px">Nada por aqui. Toque no + para lançar.</p>'}`;
+      ${itens ? '<p class="pequeno" style="margin:6px 0 0">Toque numa conta para pagar, editar ou excluir.</p>' : ''}${itens || '<p class="contexto" style="margin-top:24px">Nada por aqui. Toque no + para lançar.</p>'}${maisBtn}`;
     area.querySelector('#rec').onclick = () => mostrar('recorrentes');
-    area.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; mostrar('contas'); });
-    area.querySelectorAll('.item').forEach(el => {
+    area.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; limiteContas = 15; mostrar('contas'); });
+    const mais = area.querySelector('#mais');
+    if (mais) mais.onclick = async () => { const y = area.scrollTop; limiteContas += 15; await mostrar('contas'); area.scrollTop = y; };
+    area.querySelectorAll('.cv').forEach(el => {
+      el.addEventListener('click', e => { if (!e.target.closest('button')) el.classList.toggle('aberto'); });
       const l = todos.find(x => x.id === +el.dataset.id);
       el.querySelector('[data-a=ed]').onclick = () => abrirLancamento(l);
       el.querySelector('[data-a=alt]').onclick = async () => { l.pago = !l.pago; l.pagoEm = l.pago ? Date.now() : null; await LANC.salvar(l); mostrar('contas'); };
@@ -747,7 +774,7 @@ const telas = {
   }
 };
 
-async function abrirLancamento(edit) {
+async function abrirLancamento(edit, tipoInicial) {
   if (!(edit && typeof edit.id === 'number')) edit = null; // só edita se receber um lançamento de verdade (não um toque)
   const todos = await LANC.todos(), sug = [...new Set(todos.map(l => l.desc))];
   const hist = {}; // o que o app já aprendeu sobre cada descrição
@@ -756,7 +783,7 @@ async function abrirLancamento(edit) {
     h.cats[l.categoria] = (h.cats[l.categoria] || 0) + 1; h.valores.push(l.valor);
   });
   const ultima = await DB.ler('ultimaCategoria');
-  let tipo = edit ? edit.tipo : 'despesa', pago = edit ? edit.pago : true;
+  let tipo = edit ? edit.tipo : (tipoInicial || 'despesa'), pago = edit ? edit.pago : true;
   const f = document.createElement('div'); f.className = 'folha';
   f.innerHTML = `<div class="painel form">
     ${edit ? '<h2>Editar lançamento</h2>' : ''}
