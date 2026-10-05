@@ -272,6 +272,32 @@ function resumoMes(cfg, lancs, ym) {
            saldo: ym < iniYM ? -soma(pagas) + rec : fixos + rec - soma(pagas), cats: Object.entries(porCat).sort((a, b) => b[1] - a[1]) };
 }
 
+/* ---------- Gráfico da tela Hoje ---------- */
+// Datas de recebimento dentro do horizonte (dias do mês iguais viram um só marco)
+function marcosRecebimento(cfg, horizonte) {
+  const h = new Date(), vistos = new Map();
+  cfg.recebimentos.forEach(r => {
+    for (let m = 0; m < 3; m++) {
+      const ult = new Date(h.getFullYear(), h.getMonth() + m + 1, 0).getDate();
+      const d = new Date(h.getFullYear(), h.getMonth() + m, Math.min(r.dia, ult)), i = diasAte(d);
+      if (i >= 1 && i <= horizonte && !vistos.has(i)) vistos.set(i, 'dia ' + d.getDate());
+    }
+  });
+  return [...vistos].map(([i, rot]) => ({ i, rot }));
+}
+function curvaHoje(curva, margem, marcos, iMin) {
+  const n = curva.length - 1, X0 = 20, XW = 320, Y0 = 18, YH = 86;
+  const lo = Math.min(...curva, margem), r = (Math.max(...curva, margem) - lo) || 1;
+  const x = i => X0 + (i * XW) / n, y = v => Y0 + (1 - (v - lo) / r) * YH;
+  let d = `M${x(0)} ${y(curva[0])}`;
+  for (let i = 1; i <= n; i++) d += ` L${x(i)} ${y(curva[i - 1])} L${x(i)} ${y(curva[i])}`;
+  const ticks = marcos.map(m => `<line class="marco" x1="${x(m.i)}" x2="${x(m.i)}" y1="${Y0}" y2="${Y0 + YH}"/><text class="eixo" x="${x(m.i)}" y="126" text-anchor="middle">${m.rot}</text>`).join('');
+  const aperto = curva[iMin] < margem ? `<circle class="aperto" cx="${x(iMin)}" cy="${y(curva[iMin])}" r="5"/>` : '';
+  return `<svg class="curva" viewBox="0 0 360 134" role="img" aria-label="Saldo projetado nos próximos ${n} dias">${ticks}
+    <line class="margem" x1="${X0}" x2="${X0 + XW}" y1="${y(margem)}" y2="${y(margem)}"/><text class="rotulo" x="${X0 + XW}" y="${y(margem) - 4}" text-anchor="end">margem</text>
+    <path class="linha" d="${d}"/><circle class="ponto" cx="${x(0)}" cy="${y(curva[0])}" r="4.5"/>${aperto}<text class="rotulo" x="${X0}" y="11">hoje</text></svg>`;
+}
+
 /* ---------- Telas ---------- */
 const area = document.getElementById('tela');
 
@@ -343,42 +369,67 @@ const telas = {
     if (!cfg) return formConfig(null);
     if (cfg.saldo === undefined) return formConfig(cfg, null);
     const lancs = await LANC.todos();
-    const p = projetar(cfg, lancs);
-    const ub = await DB.ler('ultimoBackup');
-    const velho = !ub || Date.now() - ub > 30 * 864e5;
-    const pend = lancs.filter(l => l.tipo === 'despesa' && !l.pago);
-    const totalPend = pend.reduce((t, l) => t + l.valor, 0);
-    const hoje = new Date();
-    const lista = cfg.recebimentos
-      .map(r => ({ ...r, data: proximaData(r.dia, hoje) }))
-      .sort((a, b) => a.data - b.data)
-      .map(r => {
-        const dias = Math.round((r.data - new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate())) / 864e5);
-        const quando = dias === 0 ? 'hoje' : dias === 1 ? 'amanhã' : `em ${dias} dias`;
-        return `<div><span>Dia ${r.data.getDate()} · ${esc(cfg.nomes[r.quem])}</span><span>${brl(r.minimo)}<br>${quando}</span></div>`;
-      }).join('');
-    const falta = p.livre < 0;
-    const ctx = falta
-      ? `Faltam ${brl(-p.livre * p.dias)} para cobrir as contas e a margem até o dia ${p.fim.getDate()}.`
-      : `Até o dia ${p.fim.getDate()} (${p.dias} ${p.dias === 1 ? 'dia' : 'dias'}). Saldo hoje: ${brl(p.saldoAtual)}.`;
-    const apertoTxt = p.aperto.valor < cfg.margem
-      ? `Dia ${p.aperto.dia} é o mais apertado: o saldo cai para ${brl(p.aperto.valor)}, abaixo da sua margem.`
-      : `Dia ${p.aperto.dia} é o mais apertado: sobram ${brl(p.aperto.valor)}.`;
+    const p = projetar(cfg, lancs), longo = projetarLongo(cfg, lancs, [], 30);
+    const ub = await DB.ler('ultimoBackup'), semBackup = !ub || Date.now() - ub > 30 * 864e5;
+    const hojeI = hojeISO();
+    const pend = lancs.filter(l => l.tipo === 'despesa' && !l.pago).sort((a, b) => a.data.localeCompare(b.data) || a.id - b.id);
+    const noCiclo = pend.filter(l => Math.max(0, diasAte(new Date(l.data + 'T00:00:00'))) < p.dias);
+    const sobra = p.saldoAtual - p.comprometido - cfg.margem, fim = p.fim.getDate();
+    const [cls, rotulo] = sobra < 0 ? ['ruim', 'Sem folga hoje'] : longo.min < cfg.margem ? ['medio', 'Atenção nos próximos dias'] : ['ok', 'Tranquilo'];
+    const apertoTxt = `Ponto mais baixo nos próximos 30 dias: <b>${brl(longo.min)}</b> em ${diaDoIndice(longo.iMin)}${longo.min < cfg.margem ? ', abaixo da sua margem' : ''}.`;
+
+    const venc = pend.slice(0, 5).map(l => `
+      <div class="venc"><div class="d">${dataCurta(l.data)}</div>
+        <div class="m">${esc(l.desc)}${l.data < hojeI ? '<span class="tag">atrasada</span>' : ''}</div>
+        <div class="v">${brl(l.valor)}</div><button class="mini" data-id="${l.id}">Paguei</button></div>`).join('');
+
+    const grupos = {}; const h = new Date();
+    cfg.recebimentos.forEach(r => { const d = proximaData(r.dia, h), k = isoDe(d); (grupos[k] = grupos[k] || { d, itens: [] }).itens.push(r); });
+    const receb = Object.values(grupos).sort((a, b) => a.d - b.d).slice(0, 3).map(g => {
+      const n = diasAte(g.d), quando = n === 0 ? 'hoje' : n === 1 ? 'amanhã' : `em ${n} dias`;
+      const nomes = [...new Set(g.itens.map(r => cfg.nomes[r.quem]))].join(' + ');
+      return `<div><span>Dia ${g.d.getDate()} · ${quando}<br><small class="pequeno">${esc(nomes)}</small></span><span>${brl(g.itens.reduce((t, r) => t + r.minimo, 0))}</span></div>`;
+    }).join('');
+
     area.innerHTML = `
-      <h1>Olá, ${esc(cfg.nomes.eu)}. Hoje você pode gastar</h1>
+      <h1>Olá, ${esc(cfg.nomes.eu)}</h1>
+      <p class="contexto" style="margin:2px 0 0">Você pode gastar hoje</p>
       <div class="gigante"><small>R$</small>${Math.floor(Math.max(p.livre, 0) / 100)}</div>
-      <p class="contexto ${falta ? 'alerta' : ''}">${ctx}</p>
-      ${curvaSVG(p.curva, cfg.margem)}
-      <p class="contexto">${apertoTxt}</p>
-      <p class="aviso">Contas pendentes: <b>${pend.length}</b> · ${brl(totalPend)}. O cálculo usa o valor mínimo dos recebimentos.</p>
-      <div class="lista"><h1>Próximos recebimentos (valor mínimo)</h1>${lista}</div>
-      ${velho ? `<p class="aviso" style="margin-top:20px">${ub ? 'Seu último backup tem mais de 30 dias.' : 'Você ainda não fez backup.'} Faça um para não perder seus dados.</p>` : ''}
-      <button class="botao sec" id="editar" style="margin-top:24px">Editar recebimentos e saldo</button>
-      <button class="botao sec" id="fech">Fechamento do mês</button>
-      <button class="botao sec" id="bkp">Backup e restauração</button>`;
-    document.getElementById('fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
-    document.getElementById('bkp').onclick = () => mostrar('backup');
-    document.getElementById('editar').onclick = () => formConfig(cfg, p.saldoAtual);
+      <span class="chip ${cls}">${rotulo}</span>
+      <p class="contexto" style="margin-top:8px">${sobra < 0 ? `Evite novos gastos até o dia ${fim}.` : p.dias > 1 ? `Por dia, até o dia ${fim} (${p.dias} dias).` : `Até o dia ${fim}, quando chegam os recebimentos.`}</p>
+
+      <div class="sec-t">Como chegamos nesse número</div>
+      <div class="extrato">
+        <div><span>Saldo hoje</span><span>${brl(p.saldoAtual)}</span></div>
+        <div class="menos"><span>Contas até o dia ${fim} (${noCiclo.length})</span><span>− ${brl(p.comprometido)}</span></div>
+        <div class="menos"><span>Margem de segurança</span><span>− ${brl(cfg.margem)}</span></div>
+        <div class="tot"><span>${sobra >= 0 ? 'Sobra' : 'Falta'}</span><span class="${sobra >= 0 ? 'pos' : 'neg'}">${brl(Math.abs(sobra))}</span></div>
+      </div>
+
+      <div class="sec-t">Próximos 30 dias</div>
+      ${curvaHoje(longo.curva, cfg.margem, marcosRecebimento(cfg, 30), longo.iMin)}
+      <p class="contexto" style="font-size:15px">${apertoTxt}</p>
+
+      <div class="sec-t">Vence em breve</div>
+      ${venc || '<p class="contexto">Nenhuma conta pendente.</p>'}
+      ${pend.length > 5 ? `<button class="linkrow" id="todas"><span>Ver todas as pendentes (${pend.length})</span><span>›</span></button>` : ''}
+
+      <div class="sec-t">Próximos recebimentos · valor mínimo</div>
+      <div class="lista" style="margin-top:0">${receb}</div>
+
+      <div class="sec-t">Mais</div>
+      <button class="linkrow" id="fech"><span>Fechamento do mês</span><span>›</span></button>
+      <button class="linkrow" id="bkp"><span>Backup e restauração${semBackup ? '<b class="tag">fazer agora</b>' : ''}</span><span>›</span></button>
+      <button class="linkrow" id="editar"><span>Editar recebimentos e saldo</span><span>›</span></button>`;
+
+    area.querySelectorAll('.mini').forEach(b => b.onclick = async () => {
+      const l = pend.find(x => x.id === +b.dataset.id); l.pago = true; l.pagoEm = Date.now();
+      await LANC.salvar(l); mostrar('hoje');
+    });
+    const todas = area.querySelector('#todas'); if (todas) todas.onclick = () => { filtro = 'pendentes'; mostrar('contas'); };
+    area.querySelector('#fech').onclick = () => { mesFech = null; mostrar('fechamento'); };
+    area.querySelector('#bkp').onclick = () => mostrar('backup');
+    area.querySelector('#editar').onclick = () => formConfig(cfg, p.saldoAtual);
   },
   async recorrentes() {
     const lista = (await DB.ler('recorrentes')) || [];

@@ -108,3 +108,23 @@ label.botao { display: block; text-align: center; cursor: pointer; margin: 12px 
 html { -webkit-text-size-adjust: 100%; }
 input, select, textarea { font-size: 16px; min-width: 0; max-width: 100%; }
 input.valorgrande { font-size: 34px; }
+/* Etapa 10: nova tela Hoje */
+main { padding-bottom: 170px; }
+.chip { display: inline-block; font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 20px; margin: 8px 0 2px; }
+.chip.ok { background: color-mix(in srgb, var(--subida) 18%, transparent); color: var(--subida); }
+.chip.medio { background: color-mix(in srgb, var(--ambar) 18%, transparent); color: var(--ambar); }
+.chip.ruim { background: color-mix(in srgb, var(--queda) 18%, transparent); color: var(--queda); }
+.sec-t { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--suave); font-weight: 600; margin: 32px 0 4px; }
+.extrato div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--linha); font-variant-numeric: tabular-nums; }
+.extrato .menos span:last-child { color: var(--queda); }
+.extrato .tot { font-weight: 700; border-bottom: 0; font-size: 18px; }
+.venc { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--linha); }
+.venc .d { width: 48px; flex: none; font-size: 13px; color: var(--suave); text-transform: uppercase; }
+.venc .m { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.venc .v { font-weight: 700; font-variant-numeric: tabular-nums; }
+.mini { border: 1px solid var(--destaque); background: none; color: var(--destaque); border-radius: 8px; padding: 8px 10px; font-weight: 600; font-size: 14px; font-family: inherit; }
+.tag { color: var(--queda); font-size: 12px; font-weight: 700; margin-left: 6px; }
+.linkrow { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 0; background: none; color: var(--tinta); font: inherit; font-weight: 500; padding: 16px 0; border-bottom: 1px solid var(--linha); text-align: left; }
+.linkrow span:last-child { color: var(--suave); }
+.curva .marco { stroke: var(--linha); stroke-width: 1.5; stroke-dasharray: 2 4; }
+.curva .ponto { fill: var(--destaque); }
