@@ -45,7 +45,7 @@ nav button.ativa { color: var(--destaque); box-shadow: inset 0 3px 0 var(--desta
 .form .intro { color: var(--suave); margin-bottom: 24px; }
 label { display: block; font-size: 14px; color: var(--suave); margin: 14px 0 6px; }
 input, select {
-  width: 100%; font: 600 18px/1.2 inherit; font-family: inherit; color: var(--tinta);
+  width: 100%; font-weight: 600; font-size: 18px; line-height: 1.2; font-family: inherit; color: var(--tinta);
   background: var(--papel); border: 1px solid var(--linha); border-radius: 10px; padding: 13px 14px;
   font-variant-numeric: tabular-nums;
 }
@@ -54,21 +54,21 @@ input:focus, select:focus { outline: 2px solid var(--destaque); outline-offset: 
 .bloco h3 { font-size: 16px; margin-top: 14px; }
 .duas { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .erro { color: var(--queda); margin-top: 16px; min-height: 1.4em; font-weight: 600; }
-.botao { width: 100%; margin-top: 12px; border: 0; border-radius: 12px; background: var(--destaque); color: var(--fundo); font: 700 18px/1 inherit; font-family: inherit; padding: 17px; }
+.botao { width: 100%; margin-top: 12px; border: 0; border-radius: 12px; background: var(--destaque); color: var(--fundo); font-weight: 700; font-size: 18px; line-height: 1; font-family: inherit; padding: 17px; }
 .botao.sec { background: none; color: var(--destaque); border: 1px solid var(--linha); font-weight: 600; }
 .lista { margin-top: 28px; }
 .lista div { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--linha); }
 .lista span:last-child { color: var(--suave); text-align: right; }
 /* Etapa 3: lançamentos */
-.fab { position: fixed; right: 20px; bottom: calc(78px + env(safe-area-inset-bottom)); width: 60px; height: 60px; border-radius: 50%; border: 0; background: var(--destaque); color: var(--fundo); font: 400 36px/1 inherit; font-family: inherit; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+.fab { position: fixed; right: 20px; bottom: calc(78px + env(safe-area-inset-bottom)); width: 60px; height: 60px; border-radius: 50%; border: 0; background: var(--destaque); color: var(--fundo); font-weight: 400; font-size: 36px; line-height: 1; font-family: inherit; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
 .folha { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: flex-end; justify-content: center; z-index: 10; }
 .painel { background: var(--fundo); width: 100%; max-width: 520px; max-height: 92%; overflow: auto; border-radius: 20px 20px 0 0; padding: 22px 22px calc(22px + env(safe-area-inset-bottom)); }
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--papel); border: 1px solid var(--linha); border-radius: 12px; padding: 4px; margin-top: 6px; }
-.seg button { border: 0; background: none; color: var(--suave); font: 600 16px/1 inherit; font-family: inherit; padding: 12px; border-radius: 9px; }
+.seg button { border: 0; background: none; color: var(--suave); font-weight: 600; font-size: 16px; line-height: 1; font-family: inherit; padding: 12px; border-radius: 9px; }
 .seg button.on { background: var(--destaque); color: var(--fundo); }
 .valorgrande { font-size: 34px; letter-spacing: -0.02em; }
 .filtros { display: flex; gap: 8px; margin: 14px 0 6px; }
-.filtros button { border: 1px solid var(--linha); background: none; color: var(--suave); border-radius: 20px; padding: 9px 16px; font: 600 15px/1 inherit; font-family: inherit; }
+.filtros button { border: 1px solid var(--linha); background: none; color: var(--suave); border-radius: 20px; padding: 9px 16px; font-weight: 600; font-size: 15px; line-height: 1; font-family: inherit; }
 .filtros button.on { background: var(--tinta); color: var(--fundo); border-color: var(--tinta); }
 .item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--linha); }
 .item .data { font-size: 13px; color: var(--suave); text-transform: uppercase; }
@@ -77,7 +77,7 @@ input:focus, select:focus { outline: 2px solid var(--destaque); outline-offset: 
 .item .val.rec { color: var(--subida); }
 .item .val.desp { color: var(--tinta); }
 .item .acoes { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
-.item .acoes button { border: 1px solid var(--linha); background: none; color: var(--suave); border-radius: 8px; padding: 6px 10px; font: 600 13px/1 inherit; font-family: inherit; }
+.item .acoes button { border: 1px solid var(--linha); background: none; color: var(--suave); border-radius: 8px; padding: 6px 10px; font-weight: 600; font-size: 13px; line-height: 1; font-family: inherit; }
 .item .acoes button.pagar { color: var(--destaque); border-color: var(--destaque); }
 .item.paga .desc { color: var(--suave); text-decoration: line-through; }
 /* Etapa 4 */
@@ -103,3 +103,8 @@ label.botao { display: block; text-align: center; cursor: pointer; margin: 12px 
 .cat .topo { display: flex; justify-content: space-between; font-size: 15px; }
 .cat .barra { height: 8px; border-radius: 4px; background: var(--destaque); margin-top: 6px; }
 .pos { color: var(--subida); } .neg { color: var(--queda); }
+
+/* Ajuste de zoom no iPhone: campos com no mínimo 16px evitam o zoom automático ao tocar */
+html { -webkit-text-size-adjust: 100%; }
+input, select, textarea { font-size: 16px; min-width: 0; max-width: 100%; }
+input.valorgrande { font-size: 34px; }
